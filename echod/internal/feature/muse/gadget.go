@@ -9,13 +9,10 @@ package gadget
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
@@ -24,6 +21,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/lib/muse"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/muse/pairing"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
+	"github.com/google/uuid"
 )
 
 func init() {
@@ -227,16 +225,16 @@ func (f *Feature) Paired() bool {
 }
 
 // Ask says a voice note to Muse and waits for the answer; on hears it arrive (muse.Client.Ask).
-func (f *Feature) Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
+func (f *Feature) Ask(ctx context.Context, wav []byte, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error) {
 	f.mu.Lock()
 	r := f.client
 	f.mu.Unlock()
 	if r == nil {
 		return muse.Reply{}, muse.ErrOffline
 	}
-	in := muse.VoiceNote(wav)
-	in.SessionID = targetChat(config.Get().Brain.Muse.Chat)
-	return r.c.Ask(ctx, in, on)
+	input := muse.VoiceNote(wav)
+	input.SessionID = sessionID
+	return r.c.Ask(ctx, input, on)
 }
 
 func (f *Feature) Status() Status {
@@ -375,14 +373,13 @@ func (s stateStore) Save(st muse.State) error {
 	return nil
 }
 
-func targetChat(chat string) string {
+// TargetChat selects a session for a wake and its follow-ups.
+func TargetChat(chat string) string {
 	switch chat {
 	case "", "main":
 		return ""
 	case "new":
-		var suffix [4]byte
-		_, _ = rand.Read(suffix[:])
-		return fmt.Sprintf("echo-%s-%x", time.Now().UTC().Format("20060102-150405"), suffix)
+		return uuid.NewString()
 	default:
 		return chat
 	}

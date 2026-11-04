@@ -654,7 +654,12 @@ func (c *conversation) start(n nextTurn) {
 	c.turn = c.log.Begin(slot+1, phrase)
 	recording.Get().Opens(c.turn.ID(), slot)
 	be := c.be
-	c.send("start", func() error { return be.Start(phrase) })
+	c.send("start", func() error {
+		if m, ok := be.(*viaMuse); ok {
+			return m.startTurn(phrase, n.followUp)
+		}
+		return be.Start(phrase)
+	})
 
 	c.shown = State{}
 	c.enter(phaseListening)

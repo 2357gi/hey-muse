@@ -10,6 +10,7 @@ import (
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
+	gadget "github.com/HuskerMinion/techo5/echod/internal/feature/muse"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/endpoint"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/muse"
@@ -29,7 +30,7 @@ type museLink interface {
 	Ready() bool
 	// Paired is whether the Muse app has paired the device, connected just now or not.
 	Paired() bool
-	Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent)) (muse.Reply, error)
+	Ask(ctx context.Context, wav []byte, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error)
 }
 
 // speakFunc says text in voice v, calling out with the samples at 16 kHz as they arrive.
@@ -41,15 +42,24 @@ type speakFunc func(ctx context.Context, v speech.Voice, text string, out func(s
 const museChunk = mic.Rate / 10
 
 type viaMuse struct {
-	link  museLink
-	voice func() speech.Voice // the one the settings choose, asked for every reply
-	speak speakFunc
-	post  func(event)
+	link      museLink
+	voice     func() speech.Voice // the one the settings choose, asked for every reply
+	speak     speakFunc
+	post      func(event)
+	brain     func() config.Brain
+	sessionID string // Owned by the send queue; End captures it for the reply goroutine.
 	utterance
 }
 
 func newViaMuse(link museLink, voice func() speech.Voice, speak speakFunc, post func(event)) *viaMuse {
-	return &viaMuse{link: link, voice: voice, speak: speak, post: post}
+	return &viaMuse{link: link, voice: voice, speak: speak, post: post, brain: func() config.Brain { return config.Get().Brain }}
+}
+
+func (m *viaMuse) startTurn(phrase string, followUp bool) error {
+	if !followUp {
+		m.sessionID = gadget.TargetChat(m.brain().Muse.Chat)
+	}
+	return m.utterance.Start(phrase)
 }
 
 func (m *viaMuse) Name() string { return "muse" }
@@ -69,7 +79,8 @@ func (m *viaMuse) Excuse() string {
 // seconds to answer, and the next turn's start must not wait behind it.
 func (m *viaMuse) End() error {
 	if ctx, pcm := m.take(); ctx != nil {
-		safe.Go("muse turn", func() { m.answer(ctx, pcm) })
+		sessionID := m.sessionID
+		safe.Go("muse turn", func() { m.answer(ctx, pcm, sessionID) })
 	}
 	return nil
 }
@@ -95,7 +106,7 @@ func speakMuse(ctx context.Context, v speech.Voice, text string, out func(sample
 // The first Settled is taken as the whole answer and spoken there and then, inside the callback,
 // which holds Ask open while the voice plays: Muse going on after a pause is rare, and an answer
 // that waited for it would start late every time. Whatever Muse adds after that is not said.
-func (m *viaMuse) answer(ctx context.Context, pcm []byte) {
+func (m *viaMuse) answer(ctx context.Context, pcm []byte, sessionID string) {
 	fail := func(code string, err error) {
 		if ctx.Err() == nil {
 			m.post(event{kind: evError, code: code, msg: err.Error()})
@@ -107,7 +118,7 @@ func (m *viaMuse) answer(ctx context.Context, pcm []byte) {
 	var heardAt, repliedAt, firstAudioAt time.Duration
 	var spoken bool
 	var speechErr error
-	reply, err := m.link.Ask(ctx, wav, func(e muse.ReplyEvent) {
+	reply, err := m.link.Ask(ctx, wav, sessionID, func(e muse.ReplyEvent) {
 		if ctx.Err() != nil {
 			return
 		}

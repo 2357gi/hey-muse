@@ -75,7 +75,7 @@ The release carries a boot image for the Show 5 2nd gen only, the one board this
   nothing else leaves the device.
 
 In the state file, `brain.muse.chat` chooses where turns go: empty or `"main"` uses your main
-chat (the default), `"new"` creates a fresh side chat for each ask, and any other value reuses that
+chat (the default), `"new"` creates a fresh side chat for each wake and keeps its follow-ups in that chat, and any other value reuses that
 session id. Fixed ids must contain 1–64 letters, digits or dashes; invalid values fall back to main.
 
 [docs/muse.md](docs/muse.md) has the details.

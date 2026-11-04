@@ -45,7 +45,7 @@ type Brain struct {
 // Muse is Meta's Muse answering the turn, and what says its answer, since Muse returns text: an
 // OpenAI-style speech endpoint, or the device's own voice.
 type Muse struct {
-	// Chat is empty or "main" for the main chat, "new" for a fresh chat per ask, or a fixed session id.
+	// Chat is empty or "main" for the main chat, "new" for one chat per wake and its follow-ups, or a fixed session id.
 	Chat string `json:"chat,omitempty"`
 	// SDKToken is the developer's token from gadgets.muse.ai, which pairing hands to the Muse app and
 	// the device reports to Muse once. It is a secret, never shown again once saved.

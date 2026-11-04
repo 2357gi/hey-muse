@@ -8,6 +8,7 @@ require (
 	github.com/emiago/sipgo v1.4.3
 	github.com/flynn/noise v1.1.0
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/libp2p/zeroconf/v2 v2.2.0
@@ -28,7 +29,6 @@ require (
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/icholy/digest v1.1.0 // indirect
 	github.com/icza/bitio v1.1.0 // indirect
 	github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d // indirect

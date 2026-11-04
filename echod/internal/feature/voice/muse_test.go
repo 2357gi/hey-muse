@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"slices"
 	"strings"
 	"sync"
@@ -50,7 +51,7 @@ type fakeLink struct {
 func (l fakeLink) Ready() bool  { return true }
 func (l fakeLink) Paired() bool { return !l.unpaired }
 
-func (l fakeLink) Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
+func (l fakeLink) Ask(ctx context.Context, wav []byte, _ string, on func(muse.ReplyEvent)) (muse.Reply, error) {
 	return l.ask(ctx, wav, on)
 }
 
@@ -103,7 +104,7 @@ func TestMuseTurnIsReportedInOrder(t *testing.T) {
 		return muse.Reply{Text: "Done. Anything else? Also, the weather is fine.", Heard: "set a timer"}, nil
 	}}, builtIn, speaking(3*museChunk, museChunk), func(e event) { got = append(got, e) })
 
-	m.answer(context.Background(), someAudio)
+	m.answer(context.Background(), someAudio, "")
 
 	var kinds []eventKind
 	for _, e := range got {
@@ -175,7 +176,7 @@ func TestMuseEmptyAndFailedTurns(t *testing.T) {
 	} {
 		p := &posted{}
 		m := newViaMuse(fakeLink{ask: c.ask}, builtIn, c.speak, p.post)
-		m.answer(context.Background(), someAudio)
+		m.answer(context.Background(), someAudio, "")
 		if got := p.kinds(); !sameKinds(got, c.want) {
 			t.Errorf("%s: events %v, want %v", name, got, c.want)
 			continue
@@ -197,7 +198,7 @@ func TestMuseChunksAreCoalesced(t *testing.T) {
 		on(muse.Settled{Text: "Hi."})
 		return muse.Reply{Text: "Hi."}, nil
 	}}, builtIn, speaking(35*160, 160), p.post)
-	m.answer(context.Background(), someAudio)
+	m.answer(context.Background(), someAudio, "")
 
 	var sizes []int
 	for _, e := range p.all() {
@@ -257,7 +258,7 @@ func TestMuseStopPostsNothingAfter(t *testing.T) {
 		}
 		ctx, pcm := m.take()
 		done := make(chan struct{})
-		go func() { defer close(done); m.answer(ctx, pcm) }()
+		go func() { defer close(done); m.answer(ctx, pcm, "") }()
 
 		// Give the answer time to reach where it waits, then stop it there.
 		time.Sleep(50 * time.Millisecond)
@@ -330,7 +331,7 @@ func TestMuseVoiceAndItsFallback(t *testing.T) {
 			on(muse.Settled{Text: "Hi."})
 			return muse.Reply{Text: "Hi."}, nil
 		}}, func() speech.Voice { return c.voice }, engines(&asked, c.n, c.err, c.localErr), p.post)
-		m.answer(context.Background(), someAudio)
+		m.answer(context.Background(), someAudio, "")
 
 		if !slices.Equal(asked, c.asked) {
 			t.Errorf("%s: asked %v, want %v", name, asked, c.asked)
@@ -369,5 +370,23 @@ func TestMuseExcuseSaysWhich(t *testing.T) {
 	}
 	if !strings.Contains(pair, "paired") {
 		t.Errorf("the unpaired excuse does not say so: %q", pair)
+	}
+}
+
+func TestMuseFollowUpsStayInWakeChat(t *testing.T) {
+	m := newViaMuse(fakeLink{}, builtIn, nil, nil)
+	m.brain = func() config.Brain { return config.Brain{Muse: config.Muse{Chat: "new"}} }
+	var first string
+	for i, follow := range []bool{false, true, true, false} {
+		if err := m.startTurn("Hey Muse", follow); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = m.sessionID
+		}
+		if first == "" || (m.sessionID == first) != (i < 3) {
+			t.Fatalf("turn %d: unexpected chat %q", i, m.sessionID)
+		}
+		m.Stop()
 	}
 }

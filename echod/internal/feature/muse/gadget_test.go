@@ -141,7 +141,7 @@ func TestPairingThenRotation(t *testing.T) {
 	if made.count() != 0 {
 		t.Fatal("a client was made for an unpaired device")
 	}
-	if _, err := f.Ask(context.Background(), nil, nil); !errors.Is(err, muse.ErrOffline) {
+	if _, err := f.Ask(context.Background(), nil, "", nil); !errors.Is(err, muse.ErrOffline) {
 		t.Errorf("Ask while unpaired: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestPairingThenRotation(t *testing.T) {
 	if got := f.Status().Username; got != "someone" {
 		t.Errorf("after the rotation the device is %q", got)
 	}
-	if reply, err := f.Ask(context.Background(), nil, nil); err != nil || reply.Text != "hello" {
+	if reply, err := f.Ask(context.Background(), nil, "", nil); err != nil || reply.Text != "hello" {
 		t.Errorf("Ask = %+v, %v", reply, err)
 	}
 
@@ -355,15 +355,15 @@ func TestTargetChat(t *testing.T) {
 			want = ""
 		}
 		for range 2 {
-			if got := targetChat(chat); got != want {
+			if got := TargetChat(chat); got != want {
 				t.Fatalf("%q: %q", chat, got)
 			}
 		}
 	}
-	pattern := regexp.MustCompile(`^echo-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$`)
+	pattern := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	seen := map[string]bool{}
 	for range 100 {
-		id := targetChat("new")
+		id := TargetChat("new")
 		if !pattern.MatchString(id) || len(id) > 64 || seen[id] {
 			t.Fatalf("bad or repeated id %q", id)
 		}
@@ -371,7 +371,7 @@ func TestTargetChat(t *testing.T) {
 	}
 }
 
-func TestAskReadsChatSetting(t *testing.T) {
+func TestAskRoutesToSelectedChat(t *testing.T) {
 	f, made := start(t, config.BrainMuse, online)
 	if err := f.savePairing(testResult); err != nil {
 		t.Fatal(err)
@@ -386,7 +386,7 @@ func TestAskReadsChatSetting(t *testing.T) {
 		if err := config.Set().Brain().Set(b); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.Ask(context.Background(), nil, nil); err != nil {
+		if _, err := f.Ask(context.Background(), nil, TargetChat(config.Get().Brain.Muse.Chat), nil); err != nil {
 			t.Fatal(err)
 		}
 		got := c.inputs[len(c.inputs)-1].SessionID
