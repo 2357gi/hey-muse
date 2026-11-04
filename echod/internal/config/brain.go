@@ -1,5 +1,10 @@
 package config
 
+import (
+	"log/slog"
+	"regexp"
+)
+
 // Brain is where a turn's speech and answer come from when they do not come from Home Assistant: the
 // direct pipeline (feature/voice/direct.go), or Meta's Muse (feature/voice/muse.go). For the direct
 // pipeline, speech to text and text to speech are Wyoming servers (faster-whisper and Piper, as Home
@@ -40,6 +45,8 @@ type Brain struct {
 // Muse is Meta's Muse answering the turn, and what says its answer, since Muse returns text: an
 // OpenAI-style speech endpoint, or the device's own voice.
 type Muse struct {
+	// Chat is empty or "main" for the main chat, "new" for a fresh chat per ask, or a fixed session id.
+	Chat string `json:"chat,omitempty"`
 	// SDKToken is the developer's token from gadgets.muse.ai, which pairing hands to the Muse app and
 	// the device reports to Muse once. It is a secret, never shown again once saved.
 	SDKToken string `json:"sdk_token,omitempty"`
@@ -110,4 +117,13 @@ func (w BrainWriter) SetSpeechKey(key string) error {
 // SetSpeechVoice is SetVoice for Muse's speech: the voice alone, from the screen.
 func (w BrainWriter) SetSpeechVoice(voice string) error {
 	return w.st.Update(func(c *Config) { c.Brain.Muse.Speech.Voice = voice })
+}
+
+var museChatID = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
+
+func (m *Muse) validate() {
+	if m.Chat != "" && !museChatID.MatchString(m.Chat) {
+		slog.Warn("Invalid Muse chat setting; using main chat", "chat", m.Chat)
+		m.Chat = ""
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -19,9 +20,10 @@ import (
 // fakeClient stands in for muse.Client: it reports whatever states it is told to, and ends however
 // it is told to, or when ctx does.
 type fakeClient struct {
-	cfg   muse.Config
-	serve func(ctx context.Context, cfg muse.Config) error
-	ended chan struct{}
+	cfg    muse.Config
+	serve  func(ctx context.Context, cfg muse.Config) error
+	ended  chan struct{}
+	inputs []muse.AskInput
 }
 
 func (c *fakeClient) Run(ctx context.Context) error {
@@ -29,7 +31,8 @@ func (c *fakeClient) Run(ctx context.Context) error {
 	return c.serve(ctx, c.cfg)
 }
 
-func (c *fakeClient) Ask(context.Context, muse.AskInput, func(muse.ReplyEvent)) (muse.Reply, error) {
+func (c *fakeClient) Ask(_ context.Context, in muse.AskInput, _ func(muse.ReplyEvent)) (muse.Reply, error) {
+	c.inputs = append(c.inputs, in)
 	return muse.Reply{Text: "hello"}, nil
 }
 
@@ -342,5 +345,65 @@ func TestPairingLifecycle(t *testing.T) {
 	s = await(t, f, "unpaired", phase(Unpaired))
 	if s.BLEName != id || s.Username != "" {
 		t.Errorf("after unpairing: %+v", s)
+	}
+}
+
+func TestTargetChat(t *testing.T) {
+	for _, chat := range []string{"", "main", "echo-fixed"} {
+		want := chat
+		if chat == "main" {
+			want = ""
+		}
+		for range 2 {
+			if got := targetChat(chat); got != want {
+				t.Fatalf("%q: %q", chat, got)
+			}
+		}
+	}
+	pattern := regexp.MustCompile(`^echo-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$`)
+	seen := map[string]bool{}
+	for range 100 {
+		id := targetChat("new")
+		if !pattern.MatchString(id) || len(id) > 64 || seen[id] {
+			t.Fatalf("bad or repeated id %q", id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestAskReadsChatSetting(t *testing.T) {
+	f, made := start(t, config.BrainMuse, online)
+	if err := f.savePairing(testResult); err != nil {
+		t.Fatal(err)
+	}
+	f.Wake()
+	await(t, f, "online", phase(Online))
+	c := made.nth(0)
+	var fresh string
+	for _, chat := range []string{"main", "new", "new", "echo-fixed", "echo-fixed", "bad_id"} {
+		b := config.Get().Brain
+		b.Muse.Chat = chat
+		if err := config.Set().Brain().Set(b); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Ask(context.Background(), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := c.inputs[len(c.inputs)-1].SessionID
+		switch chat {
+		case "main", "bad_id":
+			if got != "" {
+				t.Fatalf("%q routed to %q", chat, got)
+			}
+		case "new":
+			if got == "" || got == fresh {
+				t.Fatalf("fresh target = %q", got)
+			}
+			fresh = got
+		default:
+			if got != chat {
+				t.Fatalf("fixed target = %q", got)
+			}
+		}
 	}
 }

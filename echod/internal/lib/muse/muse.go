@@ -144,9 +144,11 @@ const (
 // AskInput is one thing to say to Muse: words, or a recording of them. Make it with Text or
 // VoiceNote.
 type AskInput struct {
-	kind askKind
-	text string
-	wav  []byte
+	// SessionID selects a side chat; empty uses the main chat.
+	SessionID string
+	kind      askKind
+	text      string
+	wav       []byte
 }
 
 // Text is a typed message.

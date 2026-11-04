@@ -9,10 +9,13 @@ package gadget
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
@@ -231,7 +234,9 @@ func (f *Feature) Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent))
 	if r == nil {
 		return muse.Reply{}, muse.ErrOffline
 	}
-	return r.c.Ask(ctx, muse.VoiceNote(wav), on)
+	in := muse.VoiceNote(wav)
+	in.SessionID = targetChat(config.Get().Brain.Muse.Chat)
+	return r.c.Ask(ctx, in, on)
 }
 
 func (f *Feature) Status() Status {
@@ -368,4 +373,17 @@ func (s stateStore) Save(st muse.State) error {
 	// with ErrUnpaired, and the phase says so from here.
 	s.f.reconcileLocked()
 	return nil
+}
+
+func targetChat(chat string) string {
+	switch chat {
+	case "", "main":
+		return ""
+	case "new":
+		var suffix [4]byte
+		_, _ = rand.Read(suffix[:])
+		return fmt.Sprintf("echo-%s-%x", time.Now().UTC().Format("20060102-150405"), suffix)
+	default:
+		return chat
+	}
 }

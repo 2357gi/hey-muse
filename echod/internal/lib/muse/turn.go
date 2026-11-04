@@ -23,6 +23,7 @@ const (
 // chatEvent is one line of the chat stream. Fields are read loosely, because a field of the wrong
 // type means "not there" to the reference clients and has to mean the same here.
 type chatEvent struct {
+	SessionID json.RawMessage            `json:"session_id"`
 	Type      string                     `json:"type"`
 	Event     string                     `json:"event"`
 	MessageID json.RawMessage            `json:"message_id"`
@@ -64,6 +65,7 @@ type replyMessage struct {
 // themselves. So a message that starts after ours belongs to the turn, where "after ours" is after
 // the stream echoes our message, or after the acknowledgment if the echo came first.
 type turn struct {
+	sessionID string
 	messageID string
 	pending   []chatEvent
 	oursSeen  bool
@@ -89,6 +91,13 @@ func (t *turn) poke() {
 
 // add takes the next event off the stream.
 func (t *turn) add(e chatEvent) {
+	if t.sessionID != "" {
+		for _, id := range []string{rawString(e.SessionID), e.str("session_id")} {
+			if id != "" && id != t.sessionID {
+				return
+			}
+		}
+	}
 	t.lastEvent = time.Now()
 	defer t.poke()
 	switch e.Event {

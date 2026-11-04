@@ -190,6 +190,9 @@ type fakeVM struct {
 	controlOpen  frame
 	controlBuf   []byte
 	subscription int64
+	sessionID    string
+	known        map[string]bool
+	pendingReply []string
 	uploads      map[int64]*upload
 
 	registers chan map[string]any
@@ -362,16 +365,36 @@ func (vm *fakeVM) answer(stream int64, request frame, body []byte, chunks int) {
 	}
 	switch request.verb + " " + request.path {
 	case "POST " + subscribePath:
+		var target struct {
+			SessionID string `json:"session_id"`
+		}
+		_ = json.Unmarshal(body, &target)
+		vm.f.record("subscribe %s", string(body))
+		if target.SessionID != "" && !vm.known[target.SessionID] {
+			vm.write(frame{stream: stream, kind: frameResponse, status: 404, endBody: true})
+			return
+		}
+		vm.sessionID = target.SessionID
 		vm.f.mu.Lock()
 		vm.f.subscribes++
 		vm.f.mu.Unlock()
 		vm.subscription = stream
 		vm.write(frame{stream: stream, kind: frameResponse, status: 200, data: []byte("{\"type\":\"ack\"}\n")})
+		if len(vm.pendingReply) != 0 {
+			vm.streamReply(vm.pendingReply[0], vm.pendingReply[1], vm.pendingReply[2])
+			vm.pendingReply = nil
+		}
 	case "POST " + chatPath:
 		seen := chat{headers: headers, chunks: chunks, inRequest: request.endBody}
 		if err := json.Unmarshal(body, &seen.body); err != nil {
 			vm.f.t.Errorf("fake VM chat body: %v", err)
 		}
+		target, _ := seen.body["session_id"].(string)
+		vm.f.record("chat %s", target)
+		if vm.known == nil {
+			vm.known = map[string]bool{}
+		}
+		vm.known[target] = true
 		heard, _ := seen.body["message"].(string)
 		if items, _ := seen.body["items"].([]any); len(items) > 0 {
 			item := items[0].(map[string]any)
@@ -392,11 +415,14 @@ func (vm *fakeVM) answer(stream int64, request frame, body []byte, chunks int) {
 		vm.f.mu.Unlock()
 		var held []byte
 		var hold chan struct{}
-		if vm.subscription != 0 {
+		if vm.subscription != 0 && vm.sessionID == target {
 			// Events race the acknowledgment on the real service, so they go first here.
 			held, hold = vm.streamReply(userID, heard, "you said: "+heard)
 		}
-		ack, _ := json.Marshal(map[string]any{"ok": true, "result": map[string]string{"message_id": userID}})
+		if vm.subscription == 0 || vm.sessionID != target {
+			vm.pendingReply = []string{userID, heard, "you said: " + heard}
+		}
+		ack, _ := json.Marshal(map[string]any{"ok": true, "result": map[string]any{"message_id": userID, "session_id": target, "is_thread": target != ""}})
 		vm.write(frame{stream: stream, kind: frameResponse, status: 200, data: ack, endBody: true})
 		if hold != nil {
 			go func() {
@@ -416,6 +442,9 @@ func (vm *fakeVM) streamReply(userID, heard, text string) ([]byte, chan struct{}
 	seq := 0
 	line := func(name string, payload map[string]any) []byte {
 		seq++
+		if vm.sessionID != "" {
+			payload["session_id"] = vm.sessionID
+		}
 		b, _ := json.Marshal(map[string]any{"type": "event", "seq": seq, "event": name, "payload": payload})
 		return append(b, '\n')
 	}
@@ -430,6 +459,10 @@ func (vm *fakeVM) streamReply(userID, heard, text string) ([]byte, chan struct{}
 		line("agent.status", map[string]any{"activity_code": "working"}),
 		line("delta.message_start", map[string]any{"message_id": replyID, "reply_to_message_id": ""}),
 		line("delta.text_append", map[string]any{"message_id": replyID, "parent_message_id": replyID, "text": text[:half]}),
+	}
+	if vm.sessionID != "" {
+		// A newly created side chat has no earlier messages to replay.
+		first = first[2:]
 	}
 	second := [][]byte{
 		line("delta.text_append", map[string]any{"message_id": replyID, "parent_message_id": replyID, "text": text[half:]}),

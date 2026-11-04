@@ -98,6 +98,7 @@ func Load(path string) (*Store, error) {
 	}
 	_ = json.Unmarshal(b, &st.was)
 	st.c.moveSounds()
+	st.c.Brain.Muse.validate()
 
 	st.readable = true
 	return st, nil
@@ -139,6 +140,7 @@ func (st *Store) Update(f func(*Config)) error {
 	defer st.mu.Unlock()
 
 	f(&st.c)
+	st.c.Brain.Muse.validate()
 	return st.write()
 }
 
