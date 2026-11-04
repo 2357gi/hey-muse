@@ -55,7 +55,7 @@ func (r *roundRenderer) styleFace(bold bool, size int) font.Face {
 	if src == nil {
 		return r.small
 	}
-	f, err := opentype.NewFace(src, &opentype.FaceOptions{Size: float64(px), DPI: 72, Hinting: font.HintingFull})
+	f, err := newTextFace(src, &opentype.FaceOptions{Size: float64(px), DPI: 72, Hinting: font.HintingFull})
 	if err != nil {
 		slog.Error("making a clock style's face failed", "size", px, "err", err)
 		return r.small

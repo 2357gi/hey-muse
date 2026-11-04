@@ -5,7 +5,6 @@ package display
 import (
 	"image"
 	"log/slog"
-	"strings"
 	"sync"
 
 	"golang.org/x/image/font"
@@ -78,7 +77,7 @@ func (r *paint) textFace(bold bool, size int) font.Face {
 	if fc, ok := textFaces.Load(key); ok {
 		return fc.(font.Face)
 	}
-	fc, err := opentype.NewFace(f, &opentype.FaceOptions{Size: float64(key.px), DPI: 72, Hinting: font.HintingFull})
+	fc, err := newTextFace(f, &opentype.FaceOptions{Size: float64(key.px), DPI: 72, Hinting: font.HintingFull})
 	if err != nil {
 		return nil
 	}
@@ -113,24 +112,7 @@ func (r *paint) iconFace(size int) font.Face {
 
 // wrapLines breaks text into lines no wider than w.
 func (r *paint) wrapLines(face font.Face, text string, w int) []string {
-	var lines []string
-	line := ""
-	for _, word := range strings.Fields(text) {
-		try := word
-		if line != "" {
-			try = line + " " + word
-		}
-		if line != "" && r.width(face, try) > w {
-			lines = append(lines, line)
-			line = word
-			continue
-		}
-		line = try
-	}
-	if line != "" {
-		lines = append(lines, r.fit(face, line, w))
-	}
-	return lines
+	return wrapText(face, text, w)
 }
 
 // drawnTap is a tap on the drawn dashboard: on a tile, it does what the tile says.

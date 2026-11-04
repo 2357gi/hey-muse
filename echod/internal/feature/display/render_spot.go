@@ -268,7 +268,7 @@ func newRoundRenderer(dst *image.RGBA) *roundRenderer {
 		panic(err)
 	}
 	face := func(f *opentype.Font, size float64) font.Face {
-		fc, err := opentype.NewFace(f, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
+		fc, err := newTextFace(f, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
 		if err != nil {
 			panic(err)
 		}

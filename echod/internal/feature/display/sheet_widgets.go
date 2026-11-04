@@ -7,7 +7,6 @@ import (
 	"image/color"
 	"math"
 	"slices"
-	"strings"
 	"sync"
 
 	"golang.org/x/image/font"
@@ -151,27 +150,9 @@ func (r *paint) width(face font.Face, s string) int {
 	return (&font.Drawer{Face: face}).MeasureString(s).Ceil()
 }
 
-// wrap breaks text into lines no wider than maxW, on spaces; a single word wider than the line is
-// left to overflow rather than split.
+// wrap fits text to maxW, splitting a word when it exceeds the width on its own.
 func (r *paint) wrap(face font.Face, s string, maxW int) []string {
-	var lines []string
-	var line string
-	for _, word := range strings.Fields(s) {
-		try := word
-		if line != "" {
-			try = line + " " + word
-		}
-		if line != "" && r.width(face, try) > maxW {
-			lines = append(lines, line)
-			line = word
-			continue
-		}
-		line = try
-	}
-	if line != "" {
-		lines = append(lines, line)
-	}
-	return lines
+	return wrapText(face, s, maxW)
 }
 
 // shift lightens (positive) or darkens (negative) a color by d per channel.
@@ -361,7 +342,7 @@ func sheetFacesAt(s func(int) int) sheetFaces {
 	bold, _ := opentype.Parse(gobold.TTF)
 	regular, _ := opentype.Parse(goregular.TTF)
 	f := func(fn *opentype.Font, size int) font.Face {
-		fc, _ := opentype.NewFace(fn, &opentype.FaceOptions{Size: float64(s(size)), DPI: 72, Hinting: font.HintingFull})
+		fc, _ := newTextFace(fn, &opentype.FaceOptions{Size: float64(s(size)), DPI: 72, Hinting: font.HintingFull})
 		return fc
 	}
 	return sheetFaces{

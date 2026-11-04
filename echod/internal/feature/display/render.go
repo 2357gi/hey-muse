@@ -389,7 +389,7 @@ func newRenderer(dst *image.RGBA) *renderer {
 		if f == nil {
 			return nil
 		}
-		fc, err := opentype.NewFace(f, &opentype.FaceOptions{Size: float64(r.s(size)), DPI: 72, Hinting: font.HintingFull})
+		fc, err := newTextFace(f, &opentype.FaceOptions{Size: float64(r.s(size)), DPI: 72, Hinting: font.HintingFull})
 		if err != nil {
 			slog.Error("making a font face failed", "size", size, "err", err)
 			return nil

@@ -220,7 +220,7 @@ var spotFaces = sync.OnceValue(func() *sheetFaces {
 	bold, _ := opentype.Parse(gobold.TTF)
 	regular, _ := opentype.Parse(goregular.TTF)
 	f := func(fn *opentype.Font, size float64) font.Face {
-		fc, _ := opentype.NewFace(fn, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
+		fc, _ := newTextFace(fn, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
 		return fc
 	}
 	return &sheetFaces{
