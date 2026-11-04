@@ -225,13 +225,22 @@ func (f *Feature) Paired() bool {
 
 // Ask says a voice note to Muse and waits for the answer; on hears it arrive (muse.Client.Ask).
 func (f *Feature) Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
+	return f.ask(ctx, muse.VoiceNote(wav), on)
+}
+
+// AskText sends a transcript made by the owner's speech recognition server.
+func (f *Feature) AskText(ctx context.Context, text string, on func(muse.ReplyEvent)) (muse.Reply, error) {
+	return f.ask(ctx, muse.Text(text), on)
+}
+
+func (f *Feature) ask(ctx context.Context, input muse.AskInput, on func(muse.ReplyEvent)) (muse.Reply, error) {
 	f.mu.Lock()
 	r := f.client
 	f.mu.Unlock()
 	if r == nil {
 		return muse.Reply{}, muse.ErrOffline
 	}
-	return r.c.Ask(ctx, muse.VoiceNote(wav), on)
+	return r.c.Ask(ctx, input, on)
 }
 
 func (f *Feature) Status() Status {

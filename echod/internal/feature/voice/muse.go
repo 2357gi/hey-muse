@@ -17,12 +17,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/lib/speech"
 )
 
-// Muse answering the turn (config.BrainMuse): the utterance goes to Muse whole, as a voice note,
-// and Muse transcribes and answers it. The device then says the answer (lib/speech), because Muse
-// returns words: in a speech endpoint's voice when there is a key for one, else in its own, which
-// also steps in when the endpoint fails. The connection belongs to feature/muse; here it is only
-// asked. The conversation cannot tell this backend from the others, since it reports the same
-// events in the same order.
+// Muse answers either a locally transcribed message or a voice note. The device speaks its reply.
 
 // museLink is the connection a turn asks through: feature/muse's Feature, or a test's stand-in.
 type museLink interface {
@@ -41,15 +36,55 @@ type speakFunc func(ctx context.Context, v speech.Voice, text string, out func(s
 const museChunk = mic.Rate / 10
 
 type viaMuse struct {
-	link  museLink
-	voice func() speech.Voice // the one the settings choose, asked for every reply
-	speak speakFunc
-	post  func(event)
+	link       museLink
+	voice      func() speech.Voice // the one the settings choose, asked for every reply
+	speak      speakFunc
+	post       func(event)
+	brain      func() config.Brain
+	transcribe func(context.Context, config.Brain, []byte) (string, error)
 	utterance
 }
 
 func newViaMuse(link museLink, voice func() speech.Voice, speak speakFunc, post func(event)) *viaMuse {
-	return &viaMuse{link: link, voice: voice, speak: speak, post: post}
+	return &viaMuse{link: link, voice: voice, speak: speak, post: post,
+		brain: func() config.Brain { return config.Get().Brain }, transcribe: transcribe}
+}
+
+type museTextLink interface {
+	AskText(context.Context, string, func(muse.ReplyEvent)) (muse.Reply, error)
+}
+
+// ask uses the configured Wyoming recognizer when present. Muse still answers
+// and runs its device commands; only transcription moves to the owner's server.
+// If that server is unavailable, preserve the original voice-note path.
+func (m *viaMuse) ask(ctx context.Context, pcm []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
+	samples := endpoint.Trim(samplesOf(pcm))
+	b := m.brain()
+	if textLink, ok := m.link.(museTextLink); ok && strings.TrimSpace(b.STT) != "" {
+		sttCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		text, err := m.transcribe(sttCtx, b, bytesOf(samples))
+		cancel()
+		if ctx.Err() != nil {
+			return muse.Reply{}, ctx.Err()
+		}
+		if err == nil {
+			text = strings.TrimSpace(text)
+			if text == "" {
+				return muse.Reply{}, nil
+			}
+			slog.Info("muse: using local speech recognition", "language", b.Language)
+			on(muse.Heard{Text: text})
+			reply, err := textLink.AskText(ctx, text, func(e muse.ReplyEvent) {
+				if _, heard := e.(muse.Heard); !heard {
+					on(e)
+				}
+			})
+			reply.Heard = text
+			return reply, err
+		}
+		slog.Warn("muse: local recognition unavailable, using Muse voice recognition", "err", err)
+	}
+	return m.link.Ask(ctx, wavFile(media.Normalize(samples)), on)
 }
 
 func (m *viaMuse) Name() string { return "muse" }
@@ -103,11 +138,10 @@ func (m *viaMuse) answer(ctx context.Context, pcm []byte) {
 	}
 
 	start := time.Now()
-	wav := wavFile(media.Normalize(endpoint.Trim(samplesOf(pcm))))
 	var heardAt, repliedAt, firstAudioAt time.Duration
 	var spoken bool
 	var speechErr error
-	reply, err := m.link.Ask(ctx, wav, func(e muse.ReplyEvent) {
+	reply, err := m.ask(ctx, pcm, func(e muse.ReplyEvent) {
 		if ctx.Err() != nil {
 			return
 		}

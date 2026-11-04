@@ -9,7 +9,8 @@ package config
 type Brain struct {
 	Mode BrainMode `json:"mode,omitempty"`
 
-	// STT and TTS are the Wyoming servers, host:port.
+	// STT and TTS are the Wyoming servers, host:port. Muse also uses STT when set,
+	// sending its transcript as text; empty keeps Muse's own voice recognition.
 	STT string `json:"stt,omitempty"`
 	TTS string `json:"tts,omitempty"`
 	// Voice is the Piper voice, like en_US-lessac-medium; empty is the server's default.

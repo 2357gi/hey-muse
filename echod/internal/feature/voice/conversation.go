@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -551,6 +552,15 @@ func (c *conversation) handle(e event) {
 
 		switch c.phase {
 		case phaseListening:
+			// An explicit turn with a separate recognizer still owns usable audio
+			// when room noise prevents the energy detector from finding its end.
+			// Finish that audio instead of immediately queuing Stop, which cancels
+			// recognition before it can begin. Follow-ups remain quiet above.
+			if m, ok := c.be.(*viaMuse); ok && m.brain != nil && strings.TrimSpace(m.brain().STT) != "" {
+				slog.Info("listening limit reached, transcribing captured audio", "slot", c.slot+1)
+				c.think()
+				return
+			}
 			slog.Warn("gave up listening", "slot", c.slot+1, "after", wakeword.MaxListen(c.slot))
 		case phaseThinking:
 			slog.Warn("gave up waiting for an answer", "slot", c.slot+1, "after", wakeword.MaxThink(c.slot))
@@ -1062,14 +1072,47 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 		settings = endpoint.Patient
 	}
 	ep := endpoint.New(settings)
+	var neural *endpoint.Neural
+	if !fromHA {
+		var err error
+		neural, err = endpoint.DialNeural(ctx, "/run/echo-vad.sock")
+		if err == nil {
+			defer func() {
+				if neural != nil {
+					neural.Close()
+				}
+			}()
+			slog.Info("speech endpoint uses local Silero VAD", "slot", slot+1, "silence_ms", 800)
+		} else {
+			slog.Debug("local speech detector unavailable; using energy detector", "err", err)
+		}
+	}
 	var sent int
 	var endpointAt float64
 	see := func(frame []int16) {
 		sent += len(frame)
-		if endpointAt == 0 && ep.Feed(frame) {
+		if endpointAt != 0 {
+			return
+		}
+		ended, endedAt := false, 0
+		if neural != nil {
+			var err error
+			ended, err = neural.Feed(frame)
+			endedAt = neural.EndedAt()
+			if err != nil {
+				slog.Warn("local speech detector failed; using energy detector", "err", err)
+				neural.Close()
+				neural = nil
+			}
+		}
+		if neural == nil {
+			ended = ep.Feed(frame)
+			endedAt = ep.EndedAt()
+		}
+		if ended {
 			endpointAt = float64(sent) / float64(mic.Rate)
 			slog.Info("end of speech heard here", "slot", slot+1, "acted", acts,
-				"spoke_s", math.Round(float64(ep.EndedAt())/float64(mic.Rate)*10)/10,
+				"spoke_s", math.Round(float64(endedAt)/float64(mic.Rate)*10)/10,
 				"at_s", math.Round(endpointAt*10)/10)
 			if acts {
 				c.post(event{kind: evSpokeEnd, text: id})

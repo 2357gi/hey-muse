@@ -105,6 +105,13 @@ cp -r "$ROOT/tools/linux/rootfs/." "$STAGE/overlay/"
 mkdir -p "$STAGE/overlay/usr/share/licenses/techo5-japanese-font"
 cp "$ROOT/echod/internal/feature/display/fonts/LICENSE" "$STAGE/overlay/usr/share/licenses/techo5-japanese-font/OFL.txt"
 [ -n "$DEVICE_OVERLAY" ] && cp -r "$DEVICE_OVERLAY/." "$STAGE/overlay/"
+if [ "${ECHO_ASR:-0}" = 1 ]; then
+    for service in echo-asr-run echo-vad-run; do
+        install -m 755 "$ROOT/tools/echo-asr/$service" "$STAGE/overlay/usr/local/sbin/$service"
+        line="::respawn:/usr/local/sbin/$service"
+        grep -Fxq "$line" "$STAGE/overlay/etc/inittab" || echo "$line" >> "$STAGE/overlay/etc/inittab"
+    done
+fi
 cp "$INPUTS"/alpine-minirootfs-*-armv7.tar.gz "$STAGE/inputs/"
 [ -n "$VENDOR_TGZ" ] && cp "$VENDOR_TGZ" "$STAGE/inputs/vendor.tar.gz"
 cp "$INPUTS"/apks312/wpa_supplicant-2.9-*.apk "$INPUTS"/apks312/libssl1.1-*.apk "$INPUTS"/apks312/libcrypto1.1-*.apk "$STAGE/inputs/apks312/"

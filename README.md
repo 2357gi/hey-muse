@@ -21,6 +21,8 @@ who answers. Everything else about the device is TECHO5's, and its own README is
   then shows up in the Muse app's device list like any Muse gadget.
 - **A voice with no server at home.** Answers are spoken through an OpenAI-style speech endpoint, or
   by a built-in voice (SVOX Pico) that needs no key and no internet.
+- **Japanese speech recognition.** Use Moonshine tiny or base on Echo Show 5, or Whisper on a PC.
+  [Set up recognition and switch models](tools/echo-asr/README.md).
 - **A "Hey Muse" wake word,** beside TECHO5's own, chosen on the device.
 - **Things Muse can do on the device.** Set timers and alarms, change the volume, play the radio
   and show a few screen pages, asked aloud or from the Muse app.

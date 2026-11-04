@@ -63,6 +63,7 @@ func brainSection(w http.ResponseWriter, token string) {
 	  uses (faster-whisper, Piper), and any chat model with an OpenAI-style endpoint (llama.cpp, Ollama).</p>
 	 <label for="stt">Speech to text (host:port)</label>
 	 <input id="stt" name="stt" value="%s" placeholder="192.168.1.20:10300" autocomplete="off">
+	 <p class="note">Also used for Muse when set. Leave empty to use Muse's own speech recognition.</p>
 	 <label for="tts">Text to speech (host:port)</label>
 	 <input id="tts" name="tts" value="%s" placeholder="192.168.1.20:10200" autocomplete="off">
 	 <label for="voice">Voice</label>

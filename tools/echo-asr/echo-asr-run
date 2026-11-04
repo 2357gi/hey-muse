@@ -1,0 +1,25 @@
+#!/bin/sh
+# BusyBox init supervises this process. No audio or text is logged here.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+sleep 3
+ROOT=/data/echo-asr
+LOG=$ROOT/service.log
+model=models/tiny
+if [ -f "$ROOT/selected-model" ]; then
+    choice=$(cat "$ROOT/selected-model")
+    case "$choice" in
+        tiny|base) model=models/$choice ;;
+        *) echo "invalid selected-model" >&2; sleep 30; exit 1 ;;
+    esac
+elif [ ! -d "$ROOT/$model" ] && [ -d "$ROOT/model" ]; then
+    model=model  # Earlier installations stored tiny here.
+fi
+if [ ! -x "$ROOT/echo-asr-server" ] || [ ! -r "$ROOT/$model/encoder_model.ort" ]; then
+    sleep 30
+    exit 1
+fi
+if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 2000000 ]; then
+    mv -f "$LOG" "$LOG.1"
+fi
+exec "$ROOT/echo-asr-server" -root "$ROOT" -model "$model" -threads 2 >> "$LOG" 2>&1

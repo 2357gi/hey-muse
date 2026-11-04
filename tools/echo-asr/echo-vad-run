@@ -1,0 +1,14 @@
+#!/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+sleep 3
+ROOT=/data/echo-asr
+LOG=$ROOT/vad.log
+if [ ! -x "$ROOT/vad-service" ] || [ ! -r "$ROOT/silero_vad.onnx" ]; then
+    sleep 30
+    exit 1
+fi
+if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 2000000 ]; then
+    mv -f "$LOG" "$LOG.1"
+fi
+exec "$ROOT/glibc/ld-linux-aarch64.so.1" --library-path "$ROOT/glibc:$ROOT/lib" "$ROOT/vad-service" "$ROOT/silero_vad.onnx" /run/echo-vad.sock >> "$LOG" 2>&1
