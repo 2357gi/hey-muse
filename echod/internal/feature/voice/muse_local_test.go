@@ -11,11 +11,13 @@ import (
 
 type textTestLink struct {
 	fakeLink
-	text string
+	text      string
+	sessionID string
 }
 
-func (l *textTestLink) AskText(_ context.Context, text string, on func(muse.ReplyEvent)) (muse.Reply, error) {
+func (l *textTestLink) AskText(_ context.Context, text, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error) {
 	l.text = text
+	l.sessionID = sessionID
 	on(muse.Heard{Text: "server echo"})
 	on(muse.Settled{Text: "こんばんは"})
 	return muse.Reply{Text: "こんばんは"}, nil
@@ -38,12 +40,12 @@ func TestMuseLocalRecognitionSendsTextAndKeepsTranscript(t *testing.T) {
 		return " 日本語で短く挨拶して ", nil
 	}
 	var heard []string
-	reply, err := m.ask(context.Background(), someAudio, func(e muse.ReplyEvent) {
+	reply, err := m.ask(context.Background(), someAudio, "echo-test", func(e muse.ReplyEvent) {
 		if e, ok := e.(muse.Heard); ok {
 			heard = append(heard, e.Text)
 		}
 	})
-	if err != nil || l.text != "日本語で短く挨拶して" || reply.Heard != l.text || len(heard) != 1 || heard[0] != l.text {
+	if err != nil || l.sessionID != "echo-test" || l.text != "日本語で短く挨拶して" || reply.Heard != l.text || len(heard) != 1 || heard[0] != l.text {
 		t.Fatalf("wrong text path: text=%q heard=%q reply=%+v err=%v", l.text, heard, reply, err)
 	}
 }
@@ -60,13 +62,13 @@ func TestMuseLocalRecognitionFailureKeepsVoiceFallback(t *testing.T) {
 	m := newViaMuse(l, builtIn, speaking(320, 320), func(event) {})
 	m.brain = func() config.Brain { return config.Brain{STT: "local:50024", Language: "ja"} }
 	m.transcribe = func(context.Context, config.Brain, []byte) (string, error) { return "", errors.New("offline") }
-	reply, err := m.ask(context.Background(), someAudio, func(muse.ReplyEvent) {})
+	reply, err := m.ask(context.Background(), someAudio, "echo-test", func(muse.ReplyEvent) {})
 	if err != nil || called != 1 || reply.Text != "fallback" || l.text != "" {
 		t.Fatalf("fallback: %+v %v calls=%d", reply, err, called)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := m.ask(ctx, someAudio, func(muse.ReplyEvent) {}); !errors.Is(err, context.Canceled) || called != 1 {
+	if _, err := m.ask(ctx, someAudio, "echo-test", func(muse.ReplyEvent) {}); !errors.Is(err, context.Canceled) || called != 1 {
 		t.Fatal("canceled turn was sent to Muse")
 	}
 }
@@ -79,7 +81,7 @@ func TestMuseLocalSilenceDoesNotAsk(t *testing.T) {
 	m := newViaMuse(l, builtIn, speaking(320, 320), func(event) {})
 	m.brain = func() config.Brain { return config.Brain{STT: "local:50024"} }
 	m.transcribe = func(context.Context, config.Brain, []byte) (string, error) { return " ", nil }
-	if reply, err := m.ask(context.Background(), someAudio, func(muse.ReplyEvent) {}); err != nil || reply.Text != "" || l.text != "" {
+	if reply, err := m.ask(context.Background(), someAudio, "echo-test", func(muse.ReplyEvent) {}); err != nil || reply.Text != "" || l.text != "" {
 		t.Fatal("silence was not ignored")
 	}
 }

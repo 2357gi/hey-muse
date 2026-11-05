@@ -227,11 +227,13 @@ func (r *request) onFrame(f frame) {
 
 // subscription is the chat stream: a response that never ends, one JSON event to a line.
 type subscription struct {
-	s      *session
-	id     int64
-	buf    []byte
-	closed bool
-	reason string
+	s         *session
+	trace     context.Context
+	id        int64
+	sessionID string
+	buf       []byte
+	closed    bool
+	reason    string
 }
 
 func (sub *subscription) close(reason string) {
@@ -252,6 +254,12 @@ func (sub *subscription) onFrame(f frame) {
 	if f.kind == frameResponse && f.status >= 400 {
 		sub.close(fmt.Sprintf("HTTP %d", f.status))
 		return
+	}
+	if f.kind == frameResponse && f.status >= 200 && f.status < 300 {
+		LogLatency(sub.trace, sub.s.p.log, "subscription_accepted")
+	}
+	if f.kind == frameResponse && f.status >= 200 && f.status < 300 && sub.sessionID != "" {
+		sub.s.knownChats[sub.sessionID] = true
 	}
 	sub.buf = append(sub.buf, f.data...)
 	for {
@@ -318,6 +326,7 @@ type session struct {
 	mu           sync.Mutex
 	streams      map[int64]sink
 	sub          *subscription
+	knownChats   map[string]bool
 	turn         *turn
 	registeredAt time.Time
 
@@ -331,10 +340,11 @@ type session struct {
 
 func newSession(p sessionParams) *session {
 	return &session{
-		p:       p,
-		streams: map[int64]sink{},
-		ended:   make(chan struct{}),
-		slots:   make(chan struct{}, maxConcurrentInvokes),
+		p:          p,
+		streams:    map[int64]sink{},
+		knownChats: map[string]bool{},
+		ended:      make(chan struct{}),
+		slots:      make(chan struct{}, maxConcurrentInvokes),
 	}
 }
 
@@ -735,6 +745,7 @@ func (s *session) runCommand(name string, m controlMessage) (payload json.RawMes
 // voice note upload this copies leaves it out, and without it Muse took "increase the volume",
 // said to the device, to be about the phone.
 type chatBody struct {
+	SessionID      string     `json:"session_id,omitempty"`
 	Message        string     `json:"message"`
 	OutputModality string     `json:"output_modality"`
 	DeviceID       string     `json:"device_id,omitempty"`
@@ -756,27 +767,39 @@ func (s *session) jsonHeaders(extra ...header) []header {
 	}, extra...)
 }
 
-// subscribe opens the stream Muse's chat events arrive on. It is opened once and lasts the
-// session, and is only opened again if it closed.
-func (s *session) subscribe() error {
+// subscribe reuses a stream only while it is open and bound to the target chat.
+func (s *session) subscribe(ctx context.Context, target string) error {
 	s.mu.Lock()
 	old := s.sub
-	if old != nil && !old.closed {
+	if old != nil && !old.closed && old.sessionID == target {
+		old.trace = ctx
+		LogLatency(ctx, s.p.log, "subscription_reused")
 		s.mu.Unlock()
 		return nil
 	}
 	if old != nil {
+		if old.sessionID != target {
+			old.close("chat changed")
+		}
 		delete(s.streams, old.id)
 	}
 	s.mu.Unlock()
 
-	sub := &subscription{s: s}
+	if old != nil && old.sessionID != target {
+		if err := s.write(frame{stream: old.id, kind: frameReset, code: resetCanceled, reason: "chat changed"}); err != nil {
+			return err
+		}
+	}
+	body, _ := json.Marshal(struct {
+		SessionID string `json:"session_id,omitempty"`
+	}{target})
+	sub := &subscription{s: s, trace: ctx, sessionID: target}
 	id, err := s.open(frame{
 		kind:    frameRequest,
 		verb:    http.MethodPost,
 		path:    subscribePath,
 		headers: s.jsonHeaders(header{"accept", "application/x-ndjson"}),
-		data:    []byte("{}"),
+		data:    body,
 		endBody: true,
 	}, sub)
 	if err != nil {
@@ -793,7 +816,7 @@ func (s *session) subscribe() error {
 func (s *session) sendChat(ctx context.Context, in AskInput, ack *request) (int64, error) {
 	open := frame{kind: frameRequest, verb: http.MethodPost, path: chatPath, headers: s.jsonHeaders()}
 	if in.kind == askText {
-		body, err := json.Marshal(chatBody{Message: in.text, OutputModality: "text", DeviceID: s.p.nodeID})
+		body, err := json.Marshal(chatBody{SessionID: in.SessionID, Message: in.text, OutputModality: "text", DeviceID: s.p.nodeID})
 		if err != nil {
 			return 0, err
 		}
@@ -803,7 +826,7 @@ func (s *session) sendChat(ctx context.Context, in AskInput, ack *request) (int6
 
 	// The recording rides as a base64 attachment, the way Meta's voice gadgets send it, with the
 	// body in pieces after a request that carries none.
-	body, err := json.Marshal(chatBody{OutputModality: "text", DeviceID: s.p.nodeID, Items: []chatItem{{
+	body, err := json.Marshal(chatBody{SessionID: in.SessionID, OutputModality: "text", DeviceID: s.p.nodeID, Items: []chatItem{{
 		Type:       "file",
 		MIMEType:   "audio/wav",
 		Filename:   "voice_note.wav",
@@ -827,17 +850,30 @@ func (s *session) sendChat(ctx context.Context, in AskInput, ack *request) (int6
 
 // snapshot is the turn as the asker last saw it.
 type snapshot struct {
+	ready       []MessageReady
+	nextMessage int
 	text, heard string
 	whole       bool
+	finished    bool
 	quiet       time.Duration
 	subClosed   string
 	subOpen     bool
 }
 
-func (s *session) snapshot(t *turn) snapshot {
+func (s *session) snapshot(t *turn, nextMessage int) snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snap := snapshot{text: t.text(), heard: t.heard, whole: t.whole(), quiet: time.Since(t.lastEvent)}
+	snap := snapshot{text: t.text(), heard: t.heard, whole: t.whole(), finished: t.taskFinished, quiet: time.Since(t.lastEvent)}
+	snap.nextMessage = nextMessage
+	for _, m := range t.messages[nextMessage:] {
+		if !m.done {
+			break
+		}
+		if m.text != "" {
+			snap.ready = append(snap.ready, MessageReady{Text: m.text})
+		}
+		snap.nextMessage++
+	}
 	if s.sub != nil {
 		snap.subOpen, snap.subClosed = !s.sub.closed, s.sub.reason
 	}
@@ -846,8 +882,14 @@ func (s *session) snapshot(t *turn) snapshot {
 
 // ask sends one message and waits out the answer. on runs on the caller's goroutine, between the
 // waits of this function, so nothing can reach it once ask has returned.
-func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (Reply, error) {
+func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (result Reply, retErr error) {
+	ctx = WithLatency(ctx)
+	LogLatency(ctx, s.p.log, "request_start", "side_chat", in.SessionID != "")
+	defer func() { LogLatency(ctx, s.p.log, "request_done", "failed", retErr != nil) }()
 	t := newTurn()
+	t.trace = ctx
+	t.logger = s.p.log
+	t.sessionID = in.SessionID
 	s.mu.Lock()
 	switch {
 	case s.registeredAt.IsZero():
@@ -858,6 +900,8 @@ func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (Re
 		return Reply{}, ErrBusy
 	}
 	s.turn = t
+	known := in.SessionID == "" || s.knownChats[in.SessionID]
+	LogLatency(ctx, s.p.log, "route", "known_chat", known)
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -874,15 +918,34 @@ func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (Re
 		}
 	}
 
-	if err := s.subscribe(); err != nil {
-		return dropped(err)
+	if known {
+		if err := s.subscribe(ctx, in.SessionID); err != nil {
+			return dropped(err)
+		}
+	} else {
+		// Stop the previous chat before sending a turn that creates a new one.
+		s.mu.Lock()
+		old := s.sub
+		if old != nil {
+			old.close("chat changed")
+			delete(s.streams, old.id)
+			s.sub = nil
+		}
+		s.mu.Unlock()
+		if old != nil {
+			if err := s.write(frame{stream: old.id, kind: frameReset, code: resetCanceled, reason: "chat changed"}); err != nil {
+				return dropped(err)
+			}
+		}
 	}
+	LogLatency(ctx, s.p.log, "send_start")
 	ack := &request{done: make(chan struct{})}
 	stream, err := s.sendChat(ctx, in, ack)
 	defer s.forget(stream)
 	if err != nil {
 		return dropped(err)
 	}
+	LogLatency(ctx, s.p.log, "send_done")
 	timeout := time.NewTimer(s.p.t.request)
 	defer timeout.Stop()
 	select {
@@ -894,6 +957,7 @@ func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (Re
 	case <-timeout.C:
 		return Reply{}, errors.New("muse: Muse did not acknowledge the message")
 	}
+	LogLatency(ctx, s.p.log, "ack", "status", ack.status)
 	if ack.err != nil {
 		return Reply{}, ack.err
 	}
@@ -902,14 +966,36 @@ func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (Re
 	}
 	var acked struct {
 		MessageID string `json:"message_id"`
+		SessionID string `json:"session_id"`
+		IsThread  *bool  `json:"is_thread"`
 		Result    *struct {
 			MessageID string `json:"message_id"`
+			SessionID string `json:"session_id"`
+			IsThread  *bool  `json:"is_thread"`
 		} `json:"result"`
 	}
 	_ = json.Unmarshal(ack.body, &acked)
+	sessionID, isThread := acked.SessionID, acked.IsThread
 	messageID := acked.MessageID
 	if acked.Result != nil {
 		messageID = acked.Result.MessageID
+		if acked.Result.SessionID != "" {
+			sessionID = acked.Result.SessionID
+		}
+		if acked.Result.IsThread != nil {
+			isThread = acked.Result.IsThread
+		}
+	}
+	if in.SessionID != "" {
+		s.mu.Lock()
+		s.knownChats[in.SessionID] = true
+		s.mu.Unlock()
+		if sessionID != "" && sessionID != in.SessionID {
+			s.p.log.Warn("Muse acknowledged a different chat", "target", in.SessionID, "session_id", sessionID)
+		}
+		if isThread != nil && !*isThread {
+			s.p.log.Warn("Muse side chat acknowledgment has is_thread false", "session_id", in.SessionID)
+		}
 	}
 	if messageID == "" {
 		// Without it no reply can ever be matched, and the references would wait five minutes
@@ -920,12 +1006,21 @@ func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (Re
 	t.acknowledged(messageID)
 	s.mu.Unlock()
 
+	if !known {
+		// An unknown chat exists only after its first message has been acknowledged.
+		if err := s.subscribe(ctx, in.SessionID); err != nil {
+			return dropped(err)
+		}
+	}
+
+	LogLatency(ctx, s.p.log, "receive_loop")
 	started := time.Now()
 	var shown, heard, settled string
+	var nextMessage int
 	wait := time.NewTimer(0)
 	defer wait.Stop()
 	for {
-		snap := s.snapshot(t)
+		snap := s.snapshot(t, nextMessage)
 		if err := ctx.Err(); err != nil {
 			return Reply{}, err
 		}
@@ -937,9 +1032,23 @@ func (s *session) ask(ctx context.Context, in AskInput, on func(ReplyEvent)) (Re
 			shown = snap.text
 			on(ReplyText{Text: shown})
 		}
+		if snap.nextMessage != nextMessage {
+			nextMessage = snap.nextMessage
+			for _, message := range snap.ready {
+				if err := ctx.Err(); err != nil {
+					return Reply{}, err
+				}
+				on(message)
+			}
+			// The reader keeps receiving events during speech synthesis.
+			continue
+		}
 		elapsed := time.Since(started)
 		next := 250 * time.Millisecond
 		switch {
+		case snap.whole && snap.finished:
+			LogLatency(ctx, s.p.log, "task_complete")
+			return Reply{Text: shown, Heard: heard}, nil
 		case snap.whole && snap.quiet >= s.p.t.final:
 			return Reply{Text: shown, Heard: heard}, nil
 		case snap.whole && snap.quiet >= s.p.t.settle && settled != shown:

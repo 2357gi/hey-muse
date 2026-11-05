@@ -16,8 +16,8 @@ import (
 // device (config.Home.Place). Home Assistant's weather entity wins whenever it has something to say, so
 // a device that has one never sees this.
 
-// ownDays is how many days the forecast covers: the page shows five.
-const ownDays = 6
+// ownDays covers today and the following six days.
+const ownDays = 7
 
 // ownStale is how old the device's own reading may be before it is not shown: a device that has lost
 // its network should not go on showing the morning's sunshine at night.

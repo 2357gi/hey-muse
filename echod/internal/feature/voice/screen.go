@@ -14,6 +14,14 @@ type State struct {
 	Reply string
 }
 
+// DisplayPhase shows available words while the speaker prepares their audio.
+func (s State) DisplayPhase() string {
+	if s.Phase == "thinking" && s.Reply != "" {
+		return "replying"
+	}
+	return s.Phase
+}
+
 // Changed fires on every phase change and whenever a transcript or a reply arrives. It runs on the
 // conversation's goroutine, so listeners must not block.
 var Changed hook.Hook[State]

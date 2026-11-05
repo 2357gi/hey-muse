@@ -101,9 +101,10 @@ const (
 )
 
 type Display struct {
-	light *esphome.Light
-	auto  *esphome.Switch
-	clock *esphome.Select
+	standby standbyHome
+	light   *esphome.Light
+	auto    *esphome.Switch
+	clock   *esphome.Select
 	// clockStyleSel is Clock style, how the clock looks all day (clock_style.go).
 	clockStyleSel *esphome.Select
 	// styleNamed is the clock style a swipe turned to, said on the clock until styleNamedUntil.
@@ -1034,6 +1035,10 @@ func (d *Display) gesture(g touch.Gesture) {
 		d.wake()
 		return
 	}
+	if g.Kind == touch.Tap && d.r != nil && d.r.tapVoicePage(image.Pt(g.X, g.Y)) {
+		d.wake()
+		return
+	}
 	switch g.Kind {
 	case touch.Tap:
 		d.mu.Lock()
@@ -1044,6 +1049,9 @@ func (d *Display) gesture(g touch.Gesture) {
 		// what a hand put on an answer to clear it means.
 		if !weatherUp && d.answerUp(time.Now()) {
 			d.clearAnswer()
+			return
+		}
+		if idle && !weatherUp && d.r != nil && d.tapStandby(image.Pt(g.X, g.Y)) {
 			return
 		}
 		// The alert badge on the clock opens the alert, and a pill over the rain map opens its alert.
@@ -1811,6 +1819,7 @@ func (d *Display) Close() error {
 // Run redraws the screen until ctx is canceled: on the second while idle, faster while a turn is
 // on or the volume is showing, and at once when something changes.
 func (d *Display) Run(ctx context.Context) error {
+	go d.standby.run(ctx, d.wake)
 	go d.settle(ctx)
 	for {
 		wait := d.frame()
@@ -1968,8 +1977,9 @@ func (d *Display) frame() time.Duration {
 		return 80 * time.Millisecond
 	}
 
-	s := scene{now: now, phase: view.Phase, heard: view.Heard, reply: view.Reply, since: at, ring: ring, call: call}
+	s := scene{now: now, phase: view.DisplayPhase(), heard: view.Heard, reply: view.Reply, since: at, ring: ring, call: call}
 	s.snooze = config.Get().Alarms.Snooze()
+	s.home = d.standby.snapshot()
 	s.alarms = alarm.Get().View(now)
 	s.timers = timer.Get().List(now)
 	s.glance = home.Get().Glance()
@@ -1983,7 +1993,9 @@ func (d *Display) frame() time.Duration {
 		// A screen command: the screen it asked for is the answer, not the words.
 		s.phase, s.heard, s.reply = "idle", "", ""
 	}
-	if _, turn := avatar.ForPhase(s.phase); turn && avatarOn() {
+	s.homeTurn = turnStyles[turnStyleIndex()].value == "home" && (s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering")
+	s.voiceAudio = view.Phase == "replying"
+	if _, turn := avatar.ForPhase(s.phase); turn && avatarOn() && !s.homeTurn {
 		s.avatar = d.avatar
 	}
 	if s.avatar == nil && equalizerOn() && (s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
@@ -2085,6 +2097,9 @@ func (d *Display) frame() time.Duration {
 	d.showingPlaying, d.showingStrip, d.showingWord = s.nowPlaying, s.strip, playingWord(s) != ""
 	d.mu.Unlock()
 	s.weather = home.Get().Weather()
+	s.forecast = home.Get().Forecast()
+	s.forecastAt = home.Get().ForecastUpdated()
+	s.weatherPlace = config.Get().Home.Place.Name
 	s.style = styleFactsFor(clockStyle(), now)
 	s.style.named = d.styleName(now)
 	d.calendarScene(&s, now)

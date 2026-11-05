@@ -7,7 +7,9 @@
 package muse
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -23,6 +25,7 @@ const (
 // chatEvent is one line of the chat stream. Fields are read loosely, because a field of the wrong
 // type means "not there" to the reference clients and has to mean the same here.
 type chatEvent struct {
+	SessionID json.RawMessage            `json:"session_id"`
 	Type      string                     `json:"type"`
 	Event     string                     `json:"event"`
 	MessageID json.RawMessage            `json:"message_id"`
@@ -64,14 +67,20 @@ type replyMessage struct {
 // themselves. So a message that starts after ours belongs to the turn, where "after ours" is after
 // the stream echoes our message, or after the acknowledgment if the echo came first.
 type turn struct {
-	messageID string
-	pending   []chatEvent
-	oursSeen  bool
-	messages  []*replyMessage
+	trace                                                   context.Context
+	logger                                                  *slog.Logger
+	firstEvent, firstEcho, firstBusy, firstText, firstReady bool
+	sessionID                                               string
+	messageID                                               string
+	pending                                                 []chatEvent
+	oursSeen                                                bool
+	messages                                                []*replyMessage
 	// busy is Muse saying it is still working, which holds the turn open through a pause.
-	busy      bool
-	heard     string
-	lastEvent time.Time
+	busy         bool
+	runningTasks map[string]bool
+	taskFinished bool
+	heard        string
+	lastEvent    time.Time
 	// wake is poked on every change, for whoever is waiting on the answer.
 	wake chan struct{}
 }
@@ -89,16 +98,76 @@ func (t *turn) poke() {
 
 // add takes the next event off the stream.
 func (t *turn) add(e chatEvent) {
+	if t.sessionID != "" {
+		for _, id := range []string{rawString(e.SessionID), e.str("session_id")} {
+			if id != "" && id != t.sessionID {
+				return
+			}
+		}
+	}
+	if !t.firstEvent {
+		t.firstEvent = true
+		LogLatency(t.trace, t.logger, "first_event")
+	}
 	t.lastEvent = time.Now()
 	defer t.poke()
 	switch e.Event {
 	case "agent.status", "task.status":
+		activity, status := e.str("activity_code"), e.str("status")
+		switch activity {
+		case "", "working", "responding", "idle", "online", "thinking", "researching", "planning", "listening", "speaking", "processing", "generating", "executing":
+		default:
+			activity = "other"
+		}
+		switch status {
+		case "", "running", "completed", "failed", "errored", "cancelled", "canceled", "idle":
+		default:
+			status = "other"
+		}
+		LogLatency(t.trace, t.logger, "agent_status", "event", e.Event, "activity", activity, "status", status)
+
+		parent := e.str("reply_to_message_id")
+		if parent == "" {
+			parent = e.str("parent_message_id")
+		}
+		linked := parent != "" && (parent == t.messageID || t.find(parent) != nil)
+		if parent != "" && !linked {
+			break
+		}
+		if e.Event == "task.status" {
+			id := e.str("task_id")
+			switch status {
+			case "running":
+				if id != "" && len(t.runningTasks) < maxPendingEvents {
+					if t.runningTasks == nil {
+						t.runningTasks = make(map[string]bool)
+					}
+					t.runningTasks[id] = true
+				}
+				t.taskFinished = false
+			case "completed", "failed", "errored", "cancelled", "canceled":
+				if t.runningTasks[id] || linked {
+					delete(t.runningTasks, id)
+					t.taskFinished = len(t.runningTasks) == 0
+				}
+			}
+		}
 		if code := e.Payload["activity_code"]; truthyJSON(code) {
 			activity := rawString(code)
 			t.busy = activity != "online" && activity != "idle"
 		} else if status := e.Payload["status"]; truthyJSON(status) {
 			state := rawString(status)
 			t.busy = state != "completed" && state != "failed"
+		}
+		if len(t.runningTasks) > 0 {
+			t.busy = true
+		}
+		if t.taskFinished {
+			t.busy = false
+		}
+		if t.busy && !t.firstBusy {
+			t.firstBusy = true
+			LogLatency(t.trace, t.logger, "agent_working")
 		}
 	case "message.user", "delta.message_start", "delta.text_append", "delta.message_done", "message.assistant":
 		if t.messageID != "" {
@@ -137,6 +206,10 @@ func (t *turn) apply(e chatEvent, afterAck bool) {
 			return
 		}
 		t.oursSeen = true
+		if !t.firstEcho {
+			t.firstEcho = true
+			LogLatency(t.trace, t.logger, "user_echo")
+		}
 		// The stored message carries the words, which for a voice note are the transcript.
 		if text := transcript(e.str("display_text")); text != "" && e.ready() {
 			t.heard = text
@@ -177,6 +250,14 @@ func (t *turn) apply(e chatEvent, afterAck bool) {
 		if e.Event == "delta.message_done" || e.ready() {
 			m.done = true
 		}
+	}
+	if m.text != "" && !t.firstText {
+		t.firstText = true
+		LogLatency(t.trace, t.logger, "first_text_event")
+	}
+	if m.done && m.text != "" && !t.firstReady {
+		t.firstReady = true
+		LogLatency(t.trace, t.logger, "first_message_ready")
 	}
 }
 

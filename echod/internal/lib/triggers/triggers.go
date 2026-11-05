@@ -39,6 +39,13 @@ type Set struct {
 // by a native speaker on hardware. A word that turns out to be wrong makes a page not appear, which
 // is what happens today anyway, so they are worth shipping and worth correcting.
 var Languages = map[string]Set{
+	"ja": {
+		Weather:    []string{"天気", "降水確率", "雨予報", "雨が降", "雨は降", "雨雲", "雨の予報"},
+		Radar:      []string{"雨雲レーダー", "雨雲マップ"},
+		NotWeather: []string{"雨音", "雨の音", "音楽", "再生"},
+		GoHome:     []string{"ホームに戻", "ホーム画面", "時計に戻", "待機画面"},
+		Camera:     []string{"カメラ"},
+	},
 	"en": {
 		Weather:    []string{"weather", "forecast", "temperature", "rain", "snow", "how hot", "how cold", "storm", "radar", "weather map"},
 		Radar:      []string{"radar", "rain map", "weather map"},

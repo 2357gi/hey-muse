@@ -20,8 +20,14 @@ const chunkQueue = 64
 
 // stream is a reply arriving over the API, chunk by chunk, played as it goes. It belongs to the errand
 // that plays it: the conversation writes chunks and reads the counters once the claim is done.
+type playbackChunk struct {
+	partEnd  bool // flush even a short acknowledgment, keeping the stream open
+	data     []byte
+	consumed chan bool
+}
+
 type stream struct {
-	chunks chan []byte
+	chunks chan playbackChunk
 
 	// buffer is how much to collect before playing any of it. Home Assistant paces itself to stay 384
 	// ms ahead, which is enough when speech arrives faster than it plays and not when it does not.
@@ -48,7 +54,7 @@ type stream struct {
 
 func newStream(splices, underruns uint64, buffer time.Duration) *stream {
 	return &stream{
-		chunks:      make(chan []byte, chunkQueue),
+		chunks:      make(chan playbackChunk, chunkQueue),
 		buffer:      buffer,
 		splicesAt:   splices,
 		underrunsAt: underruns,
@@ -57,11 +63,15 @@ func newStream(splices, underruns uint64, buffer time.Duration) *stream {
 
 // send hands a chunk to whoever is playing it. A queue this deep only fills if audio is arriving
 // faster than it plays, in which case a dropped chunk is the least of it.
-func (s *stream) send(data []byte) {
+func (s *stream) send(chunk playbackChunk) {
 	select {
-	case s.chunks <- data:
+	case s.chunks <- chunk:
 	default:
-		slog.Warn("reply chunk dropped", "bytes", len(data))
+		if chunk.consumed != nil {
+			chunk.consumed <- false
+		} else {
+			slog.Warn("reply chunk dropped", "bytes", len(chunk.data))
+		}
 	}
 }
 
@@ -75,13 +85,23 @@ func (s *stream) play(ctx context.Context, p *speaker.Player, started func()) er
 		select {
 		case <-ctx.Done():
 			return nil
-		case data, ok := <-s.chunks:
+		case chunk, ok := <-s.chunks:
 			if !ok {
 				// Whatever is still held will never be joined by more, so it just plays.
 				s.flush(p)
 				return nil
 			}
-			s.take(data, p, started)
+			if chunk.partEnd {
+				if len(s.held) > 0 && s.playingAt.IsZero() {
+					s.playingAt = time.Now()
+				}
+				s.flush(p)
+			} else {
+				s.take(chunk.data, p, started)
+			}
+			if chunk.consumed != nil {
+				chunk.consumed <- true
+			}
 		}
 	}
 }

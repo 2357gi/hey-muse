@@ -1,0 +1,8 @@
+home-local.json
+*.sqlite*
+*.env
+*.wav
+*.pcm
+*-measurement.json
+test-result.json
+.venv/

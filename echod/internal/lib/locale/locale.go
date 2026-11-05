@@ -20,6 +20,18 @@ type words struct {
 }
 
 var langs = map[string]*words{
+	"ja": {
+		days:        [7]string{"日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日"},
+		shortDays:   [7]string{"日", "月", "火", "水", "木", "金", "土"},
+		months:      [12]string{"1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
+		shortMonths: [12]string{"1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
+		sky: map[string]string{
+			"clear-night": "晴れ", "sunny": "晴れ", "partlycloudy": "晴れ時々曇り", "cloudy": "曇り",
+			"rainy": "雨", "pouring": "強い雨", "snowy": "雪", "snowy-rainy": "みぞれ",
+			"lightning": "雷", "lightning-rainy": "雷雨", "fog": "霧", "hail": "ひょう",
+			"windy": "強風", "windy-variant": "強風", "exceptional": "不明",
+		},
+	},
 	"de": {
 		days:        [7]string{"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"},
 		shortDays:   [7]string{"So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"},

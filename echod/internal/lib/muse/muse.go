@@ -144,9 +144,11 @@ const (
 // AskInput is one thing to say to Muse: words, or a recording of them. Make it with Text or
 // VoiceNote.
 type AskInput struct {
-	kind askKind
-	text string
-	wav  []byte
+	// SessionID selects a side chat; empty uses the main chat.
+	SessionID string
+	kind      askKind
+	text      string
+	wav       []byte
 }
 
 // Text is a typed message.
@@ -163,6 +165,12 @@ type Heard struct{ Text string }
 
 // ReplyText is the whole answer so far, sent each time it grows.
 type ReplyText struct{ Text string }
+
+// MessageReady is one completed assistant message, in chat order. Muse can
+// still be working on the user's request when this is delivered.
+type MessageReady struct{ Text string }
+
+func (MessageReady) replyEvent() {}
 
 // Settled is the answer once every message in it is complete and Muse has paused. It is almost
 // always the whole answer, a moment before Ask returns to confirm it, so it is the time to start

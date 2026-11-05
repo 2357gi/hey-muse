@@ -43,16 +43,18 @@ var shade = color.RGBA{0x00, 0x00, 0x00, 0x90}
 
 // scene is one frame's worth of facts.
 type scene struct {
-	now     time.Time
-	phase   string      // idle, listening, thinking, replying, lingering
-	eq      *eqView     // a turn's bars, when turns are drawn as the equalizer
-	avatar  *avatar.Set // the Muse character, when a turn is drawn with it (render_avatar.go)
-	heard   string
-	reply   string
-	since   time.Time
-	playing bool
-	paused  bool
-	muted   bool
+	homeTurn, voiceAudio bool
+	home                 standbyView
+	now                  time.Time
+	phase                string      // idle, listening, thinking, replying, lingering
+	eq                   *eqView     // a turn's bars, when turns are drawn as the equalizer
+	avatar               *avatar.Set // the Muse character, when a turn is drawn with it (render_avatar.go)
+	heard                string
+	reply                string
+	since                time.Time
+	playing              bool
+	paused               bool
+	muted                bool
 
 	// glance is the glance strip's chips (feature/home/glance.go), drawn at the foot of the clock page.
 	glance []home.Chip
@@ -104,8 +106,10 @@ type scene struct {
 
 	// showWeather is the forecast page, for a while after a weather question; nowPlaying is the
 	// idle screen while the radio plays or sits paused.
-	showWeather bool
-	forecast    forecastDays
+	showWeather  bool
+	forecastAt   time.Time
+	weatherPlace string
+	forecast     forecastDays
 	// showRadar is the rain map in place of the forecast.
 	showRadar  bool
 	radar      home.RadarView
@@ -243,7 +247,9 @@ type scene struct {
 // renderer draws scenes onto one canvas. Faces are made once: parsing a font is cheap, but
 // building a face at each size is not something to do per frame.
 type renderer struct {
-	paint // the canvas, its size, and the settings screen's tap zones
+	turnPanel voicePanel
+	homeZones []homeZone // protected by zmu
+	paint                // the canvas, its size, and the settings screen's tap zones
 	// glow is the Glow style's images, kept between frames (glow.go).
 	glow glowBuffers
 
@@ -415,6 +421,13 @@ func newRenderer(dst *image.RGBA) *renderer {
 // draw composes a whole frame. Everything is repainted: the canvas is small and a full paint is
 // simpler than tracking what changed.
 func (r *renderer) draw(s scene) {
+	r.zmu.Lock()
+	r.turnPanel.prev, r.turnPanel.next = image.Rectangle{}, image.Rectangle{}
+	if !s.homeTurn || s.phase == "listening" {
+		r.turnPanel.page = 0
+	}
+	r.homeZones = nil
+	r.zmu.Unlock()
 	if !s.showDeck {
 		// Where the deck's buttons were is nothing to tap once something else is drawn there.
 		r.zmu.Lock()
@@ -559,9 +572,7 @@ func (r *renderer) draw(s scene) {
 	}
 	if s.showWeather {
 		r.weatherPageKept(s)
-		// The bolt strikes in the gap between today's reading and the five days.
-		r.sky(s.sky, s.now, r.dst.Rect, image.Rect(r.w/2-r.s(80), r.s(70), r.w/2-r.s(10), r.s(400)))
-		r.footer(s)
+		// Keep the forecast's dates, probabilities and controls unobscured.
 		if s.showVolume {
 			r.volumeBar(s)
 		}
@@ -576,7 +587,9 @@ func (r *renderer) draw(s scene) {
 	}
 
 	if s.eq != nil {
-		if s.eq.wave {
+		if s.homeTurn {
+			r.drawVoicePanel(s)
+		} else if s.eq.wave {
 			r.wave(s)
 		} else {
 			r.equalizer(s)
@@ -616,6 +629,9 @@ func (r *renderer) draw(s scene) {
 			r.slideshowScreensaverPage(s)
 		} else if s.nowPlaying {
 			r.nowPlaying(s)
+		} else if s.home.Enabled && s.phase == "idle" && !s.showDrawer && !s.strip && !s.showAnnouncement && !s.showReminder && s.popup == nil && !s.showVolume && !s.announceRecording {
+			r.drawStandby(s)
+			return
 		} else {
 			if s.slideshow != nil {
 				r.slideshowBackground(s.slideshow)

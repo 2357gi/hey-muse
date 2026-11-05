@@ -15,14 +15,14 @@ import (
 )
 
 // weatherShow is how long the weather page stays after the question that brought it up.
-const weatherShow = 30 * time.Second
+const weatherShow = 60 * time.Second
 
 // weatherPage is today large on the left and the next days as columns on the right.
 // weatherPageKept is weatherPage, drawn only when what it shows has changed and copied otherwise: the
 // page is most of a frame's cost (its faded icon is a whole panel blended), and a moving sky asks for a
 // frame every 83 ms. What it shows is the reading, the forecast, the corner clock and the colors.
 func (r *renderer) weatherPageKept(s scene) {
-	key := fmt.Sprint(clockText(s.now), s.weather, s.forecast, r.w, r.h, walnut, cream, amber, dim, ember)
+	key := fmt.Sprint(s.now.Format("2006-01-02 15:04"), s.weather, s.forecast, s.forecastAt, s.weatherPlace, r.w, r.h, walnut, cream, amber, dim, ember)
 	if key == r.weatherKey && len(r.weatherKept) == len(r.dst.Pix) {
 		copy(r.dst.Pix, r.weatherKept)
 		return
@@ -33,62 +33,82 @@ func (r *renderer) weatherPageKept(s scene) {
 }
 
 func (r *renderer) weatherPage(s scene) {
-	r.cornerClock(s)
-	r.text(r.small, "Weather", r.margin, r.margin+r.s(26), amber)
-
-	days := s.forecast
-	now := s.weather
-	cond := weatherNow(now, days, s.now)
-	// The day's weather, large and faint, behind everything.
-	// Sized from the width, not the height: on the Show 5 both give 720, but a taller panel would
-	// grow this until it swallowed the page.
-	r.faded(40, func() { r.weatherIcon(cond, r.w/2, r.h/2+r.s(20), r.w*3/4) })
-
-	// Today: a big icon, the reading beside it, the day's range and rain beneath.
-	r.weatherIcon(cond, r.margin+r.s(80), r.s(190), r.s(150))
-	big := now.Temp
-	if big == "" && len(days) > 0 {
-		big = fmt.Sprintf("%.0f°", days[0].High)
+	draw.Draw(r.dst, r.dst.Bounds(), image.NewUniform(homeInk.bg), image.Point{}, draw.Src)
+	text := func(size int, bold bool, line string, x, y int, c color.RGBA) {
+		r.text(r.styleFace(bold, size), line, r.s(x), r.s(y), c)
 	}
-	r.text(r.big, big, r.margin+r.s(170), r.s(225), cream)
-	r.text(r.body, conditionWords(cond), r.margin, r.s(300), sunPale)
-	if len(days) > 0 {
-		r.text(r.small, fmt.Sprintf("High %.0f°   Low %.0f°", days[0].High, days[0].Low), r.margin, r.s(345), dim)
-		if days[0].Rain >= 0 {
-			r.text(r.small, fmt.Sprintf("Rain %d%%", days[0].Rain), r.margin, r.s(385), rainBlue)
+	text(27, true, "今日の天気", 28, 42, homeInk.text)
+	text(22, false, s.weatherPlace, 208, 42, homeInk.mint)
+	text(24, false, s.now.Format("15:04"), 856, 42, homeInk.muted)
+	today := s.now.Format("2006-01-02")
+	var day *hass.Day
+	for i := range s.forecast {
+		if s.forecast[i].When.Local().Format("2006-01-02") == today {
+			day = &s.forecast[i]
+			break
 		}
 	}
-
-	// The next five days as columns, each with its own icon.
-	if len(days) > 1 {
-		left := r.w/2 + r.s(10)
-		cols := min(5, len(days)-1)
-		colW := (r.w - r.margin - left) / cols
-		for i := 0; i < cols; i++ {
-			d := days[i+1]
-			x := left + i*colW
-			// Each day in its own box.
-			r.box(image.Rect(x+r.s(3), r.s(88), x+colW-r.s(3), r.s(360)), ember, r.s(2))
-			name := locale.ShortWeekday(d.When, screenLang())
-			if d.When.IsZero() {
-				name = fmt.Sprintf("+%d", i+1)
-			}
-			r.text(r.small, name, x+(colW-r.width(r.small, name))/2, r.s(122), amber)
-			r.weatherIcon(d.Condition, x+colW/2, r.s(178), min(colW-r.s(10), r.s(68)))
-			hi := fmt.Sprintf("%.0f°", d.High)
-			lo := fmt.Sprintf("%.0f°", d.Low)
-			r.text(r.body, hi, x+(colW-r.width(r.body, hi))/2, r.s(262), cream)
-			r.text(r.small, lo, x+(colW-r.width(r.small, lo))/2, r.s(300), dim)
-			if d.Rain > 0 {
-				p := fmt.Sprintf("%d%%", d.Rain)
-				r.text(r.tiny, p, x+(colW-r.width(r.tiny, p))/2, r.s(338), rainBlue)
+	cond := s.weather.Condition
+	if day != nil {
+		cond = day.Condition
+	}
+	if cond != "" {
+		r.weatherIcon(cond, r.s(89), r.s(136), r.s(102))
+	}
+	current := s.weather.Temp
+	if current == "" {
+		current = "—"
+	}
+	text(18, false, "現在の外気温", 166, 92, homeInk.muted)
+	text(56, true, current, 164, 154, homeInk.text)
+	if day != nil {
+		text(26, true, locale.Sky(day.Condition, "ja"), 338, 100, homeInk.text)
+		text(23, false, fmt.Sprintf("最高 %.0f° / 最低 %.0f°", day.High, day.Low), 338, 141, homeInk.muted)
+		text(24, true, "降水確率 "+rainChance(day.Rain), 338, 183, homeInk.mint)
+	} else {
+		text(23, false, "今日の予報を取得できません", 338, 128, homeInk.muted)
+	}
+	text(23, true, "7日間の予報", 28, 232, homeInk.text)
+	for i := 0; i < 7; i++ {
+		at := s.now.AddDate(0, 0, i)
+		var d *hass.Day
+		for j := range s.forecast {
+			if s.forecast[j].When.Local().Format("2006-01-02") == at.Format("2006-01-02") {
+				d = &s.forecast[j]
+				break
 			}
 		}
-	} else if len(days) == 0 {
-		msg := "No forecast yet: give the device a Home Assistant token, or set where it is on its setup page"
-		r.text(r.tiny, msg, r.w/2-r.s(20), r.s(200), dim)
+		x := 26 + i*131
+		b := image.Rect(r.s(x), r.s(248), r.s(x+122), r.s(408))
+		r.roundFill(b, 12, homeInk.panel, homeInk.panel)
+		label := fmt.Sprintf("%d/%d(%s)", at.Month(), at.Day(), locale.ShortWeekday(at, "ja"))
+		if i == 0 {
+			label = "今日"
+		}
+		text(19, true, label, x+9, 276, homeInk.text)
+		if d == nil {
+			text(20, false, "未取得", x+29, 338, homeInk.muted)
+			continue
+		}
+		r.weatherIcon(d.Condition, r.s(x+61), r.s(308), r.s(44))
+		text(20, true, fmt.Sprintf("%.0f° / %.0f°", d.High, d.Low), x+12, 355, homeInk.text)
+		text(19, false, rainChance(d.Rain), x+37, 389, homeInk.mint)
 	}
-	r.weatherToggle("Radar")
+	text(16, false, "各日の最高 / 最低気温・降水確率（日内最大）", 28, 429, homeInk.muted)
+	stamp := "未取得"
+	if !s.forecastAt.IsZero() {
+		stamp = "取得 " + s.forecastAt.Local().Format("1/2 15:04")
+	}
+	text(15, false, "Open-Meteo  ·  "+stamp, 28, 464, homeInk.muted)
+	text(19, false, "画面をタップして戻る", 510, 464, homeInk.muted)
+	r.weatherToggle("雨雲")
+}
+
+func rainChance(p int) string {
+	if p < 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%d%%", p)
 }
 
 // forecastDays is a type alias for the scene.
@@ -100,7 +120,7 @@ const radarStep = 600 * time.Millisecond
 // weatherButton is the button at the foot of the weather page that turns between the forecast and
 // the rain map.
 func (r *renderer) weatherButton() image.Rectangle {
-	return image.Rect(r.w-r.margin-r.s(150), r.h-r.s(100), r.w-r.margin, r.h-r.s(52))
+	return image.Rect(r.w-r.margin-r.s(150), r.h-r.s(46), r.w-r.margin, r.h-r.s(6))
 }
 
 // weatherToggle is that button drawn, with its label centered in it. The box is scaled along with the
@@ -108,8 +128,9 @@ func (r *renderer) weatherButton() image.Rectangle {
 // "Forecast" ran out of both ends of it.
 func (r *renderer) weatherToggle(label string) {
 	b := r.weatherButton()
-	r.bevel(b, shift(ember, 16), true)
-	r.text(r.small, label, b.Min.X+(b.Dx()-r.width(r.small, label))/2, b.Max.Y-r.s(15), cream)
+	r.roundFill(b, float64(r.s(10)), homeInk.button, homeInk.button)
+	f := r.styleFace(false, 22)
+	r.text(f, label, b.Min.X+(b.Dx()-r.width(f, label))/2, b.Max.Y-r.s(12), homeInk.text)
 }
 
 // radarPage is the rain map filling the panel, the loop's time and the credits over it, and home
@@ -126,7 +147,7 @@ func (r *renderer) radarPage(s scene) {
 		for i, line := range r.wrap(r.body, msg, r.w-2*r.margin) {
 			r.text(r.body, line, r.margin, r.s(200)+i*r.s(44), dim)
 		}
-		r.weatherToggle("Forecast")
+		r.weatherToggle("天気")
 		return
 	}
 
@@ -189,7 +210,7 @@ func (r *renderer) radarPage(s scene) {
 		shade(image.Rect(0, r.h-r.s(62), r.margin+r.width(r.tiny, note)+r.s(10), r.h-r.s(34)))
 		r.text(r.tiny, note, r.margin, r.h-r.s(40), amber)
 	}
-	r.weatherToggle("Forecast")
+	r.weatherToggle("天気")
 }
 
 // ring is a circle outline one pixel wide.

@@ -228,7 +228,10 @@ func (f *Feature) refreshForecast() {
 func (f *Feature) Forecast() []hass.Day {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]hass.Day(nil), f.forecast...)
+	if f.fetched.IsZero() || time.Since(f.fetched) > ownStale {
+		return nil
+	}
+	return forecastFrom(f.forecast, time.Now())
 }
 
 var (

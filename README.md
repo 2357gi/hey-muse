@@ -31,8 +31,9 @@ who answers. Everything else about the device is TECHO5's, and its own README is
 - **A Usage screen.** A clock style that shows meters sent from your computer, made for a Claude
   Code plan's usage. See [docs/usage-screen.md](docs/usage-screen.md).
 
-Smart home control is not part of this. The Echo is the voice. Reaching your lights and speakers is
-Muse's own business, for example through [Muse Home Link](https://gadgets.muse.ai/home-link).
+This branch also includes Japanese speech and display support, per-wake side chats, a calendar
+and weather dashboard, and optional local SwitchBot control through a PC bridge.
+See [the consolidated changes and setup](docs/muse-local-changes.md).
 
 ## What you need
 
@@ -70,11 +71,16 @@ The release carries a boot image for the Show 5 2nd gen only, the one board this
 ## What your voice does
 
 - The wake word is detected on the device. Nothing is sent while it waits.
-- After the wake word, what you say (60 seconds at most) goes to Muse as a recording. Muse keeps it
-  on the message in your Muse account and transcribes it there. Anyone who speaks to the device is
-  recorded into your account the same way.
+- After the wake word, the configured local recognizer can transcribe your speech. Local weather
+  and configured appliance commands are handled before Muse. Other transcripts go to Muse as text.
+  Without local recognition, audio goes to Muse as a voice note and is stored in your account.
+  See [speech recognition and fallback behavior](tools/echo-asr/README.md).
 - With a cloud voice, the text of each answer goes to the speech provider. With the built-in voice,
   nothing else leaves the device.
+
+In the state file, `brain.muse.chat` chooses where turns go: empty or `"main"` uses your main
+chat (the default), `"new"` creates a fresh side chat for each wake and keeps follow-ups in that chat, and any other value reuses that
+session id. Set the follow-up time on the active wake word to 8 seconds and the follow-up count to 0 to keep listening after each reply until nobody answers. Fixed ids must contain 1–64 letters, digits or dashes; invalid values fall back to main.
 
 [docs/muse.md](docs/muse.md) has the details.
 

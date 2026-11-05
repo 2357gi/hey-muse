@@ -14,14 +14,16 @@ import (
 // moving with the voice being heard and the answer being spoken. Classic until somebody chooses.
 
 // turnStyles are the choices, with what the config keeps for each; Classic is kept as nothing.
-var turnStyles = []struct {
+type turnStyle struct {
 	label string
 	value string
-}{
+}
+
+var turnStyles = append([]turnStyle{
 	{"Classic", ""},
 	{"Wave", "wave"},
 	{"Bars", "equalizer"},
-}
+}, homeTurnStyles...)
 
 func turnStyleOptions() []string {
 	out := make([]string, len(turnStyles))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"slices"
 	"strings"
 	"sync"
@@ -50,7 +51,7 @@ type fakeLink struct {
 func (l fakeLink) Ready() bool  { return true }
 func (l fakeLink) Paired() bool { return !l.unpaired }
 
-func (l fakeLink) Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
+func (l fakeLink) Ask(ctx context.Context, wav []byte, _ string, on func(muse.ReplyEvent)) (muse.Reply, error) {
 	return l.ask(ctx, wav, on)
 }
 
@@ -86,37 +87,82 @@ func sameKinds(a, b []eventKind) bool {
 // Twenty milliseconds of something said, as the microphone hands it over.
 var someAudio = bytesOf(make([]int16, 320))
 
+func TestMuseShowsReplyBeforeSettleAndSpeech(t *testing.T) {
+	c := &conversation{phase: phaseThinking, shown: State{Phase: "thinking"}}
+	var spoken []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newViaMuse(fakeLink{ask: func(_ context.Context, _ []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
+		for _, text := range []string{"はい", "はい、こんにちは。"} {
+			on(muse.ReplyText{Text: text})
+			if c.shown.DisplayPhase() != "replying" || c.shown.Reply != text || len(spoken) != 0 {
+				t.Fatalf("preview before settle: state=%+v spoken=%v", c.shown, spoken)
+			}
+		}
+		on(muse.Settled{Text: "はい、こんにちは。"})
+		return muse.Reply{Text: "はい、こんにちは。"}, nil
+	}}, builtIn, func(_ context.Context, _ speech.Voice, text string, _ func([]int16) error) error {
+		spoken = append(spoken, text)
+		return nil
+	}, func(e event) {
+		if e.kind == evReplyPreview {
+			c.handle(e)
+		}
+	})
+	m.answer(ctx, someAudio, "")
+	if !slices.Equal(spoken, []string{"はい、こんにちは。"}) {
+		t.Fatalf("spoken=%v", spoken)
+	}
+	cancel()
+	c.handle(event{kind: evReplyPreview, text: "stale", ctx: ctx})
+	if c.shown.Reply == "stale" {
+		t.Fatal("canceled preview replaced the next turn")
+	}
+}
+
 // A turn is reported the way Home Assistant's is: heard, then the reply and the question it asks,
 // then the voice, then the ends. The voice note is a WAV of what was heard, and a second settle
 // changes nothing.
 func TestMuseTurnIsReportedInOrder(t *testing.T) {
 	var got []event
 	var wav []byte
+	var parts []string
 	settles := 0
 	m := newViaMuse(fakeLink{ask: func(ctx context.Context, w []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
 		wav = w
 		on(muse.Heard{Text: " set a timer "})
+		on(muse.MessageReady{Text: "**Done.** Anything else?"})
+		if len(parts) != 1 || parts[0] != "Done. Anything else?" || got[len(got)-1].kind != evMusePartEnd {
+			t.Fatal("acknowledgment not flushed before final message")
+		}
 		on(muse.Settled{Text: "**Done.** Anything else?"})
 		settles++
-		on(muse.Settled{Text: "Done. Anything else? Also, the weather is fine."})
+		on(muse.MessageReady{Text: "Also, the weather is fine."})
+		on(muse.Settled{Text: "Done. Anything else?\n\nAlso, the weather is fine."})
 		settles++
-		return muse.Reply{Text: "Done. Anything else? Also, the weather is fine.", Heard: "set a timer"}, nil
-	}}, builtIn, speaking(3*museChunk, museChunk), func(e event) { got = append(got, e) })
+		return muse.Reply{Text: "Done. Anything else?\n\nAlso, the weather is fine.", Heard: "set a timer"}, nil
+	}}, builtIn, func(ctx context.Context, v speech.Voice, text string, out func([]int16) error) error {
+		parts = append(parts, text)
+		return speaking(3*museChunk, museChunk)(ctx, v, text, out)
+	}, func(e event) { got = append(got, e) })
 
-	m.answer(context.Background(), someAudio)
+	m.answer(context.Background(), someAudio, "")
 
 	var kinds []eventKind
 	for _, e := range got {
 		kinds = append(kinds, e.kind)
 	}
-	want := []eventKind{evHeard, evReplyText, evContinue, evStreamAudio, evStreamAudio, evStreamAudio, evStreamEnd, evRunEnd}
+	want := []eventKind{evHeard, evReplyText, evStreamAudio, evStreamAudio, evStreamAudio, evMusePartEnd, evReplyText, evStreamAudio, evStreamAudio, evStreamAudio, evMusePartEnd, evStreamEnd, evRunEnd}
 	if !sameKinds(kinds, want) {
 		t.Fatalf("events %v, want %v", kinds, want)
 	}
 	if got[0].text != "set a timer" || got[1].text != "Done. Anything else?" {
 		t.Errorf("heard %q, replied %q", got[0].text, got[1].text)
 	}
-	for _, e := range got[3:6] {
+	if !slices.Equal(parts, []string{"Done. Anything else?", "Also, the weather is fine."}) {
+		t.Fatalf("spoken messages: %v", parts)
+	}
+	for _, e := range got[2:5] {
 		if len(e.audio) != 2*museChunk {
 			t.Errorf("a chunk of %d bytes, want %d", len(e.audio), 2*museChunk)
 		}
@@ -150,7 +196,7 @@ func TestMuseEmptyAndFailedTurns(t *testing.T) {
 				return muse.Reply{Text: "Hi.", Heard: "hello"}, nil
 			},
 			speak: speaking(museChunk, museChunk),
-			want:  []eventKind{evHeard, evReplyText, evStreamAudio, evStreamEnd, evRunEnd},
+			want:  []eventKind{evHeard, evReplyText, evStreamAudio, evMusePartEnd, evStreamEnd, evRunEnd},
 		},
 		"muse failed": {
 			ask: func(context.Context, []byte, func(muse.ReplyEvent)) (muse.Reply, error) {
@@ -175,7 +221,7 @@ func TestMuseEmptyAndFailedTurns(t *testing.T) {
 	} {
 		p := &posted{}
 		m := newViaMuse(fakeLink{ask: c.ask}, builtIn, c.speak, p.post)
-		m.answer(context.Background(), someAudio)
+		m.answer(context.Background(), someAudio, "")
 		if got := p.kinds(); !sameKinds(got, c.want) {
 			t.Errorf("%s: events %v, want %v", name, got, c.want)
 			continue
@@ -197,7 +243,7 @@ func TestMuseChunksAreCoalesced(t *testing.T) {
 		on(muse.Settled{Text: "Hi."})
 		return muse.Reply{Text: "Hi."}, nil
 	}}, builtIn, speaking(35*160, 160), p.post)
-	m.answer(context.Background(), someAudio)
+	m.answer(context.Background(), someAudio, "")
 
 	var sizes []int
 	for _, e := range p.all() {
@@ -257,7 +303,7 @@ func TestMuseStopPostsNothingAfter(t *testing.T) {
 		}
 		ctx, pcm := m.take()
 		done := make(chan struct{})
-		go func() { defer close(done); m.answer(ctx, pcm) }()
+		go func() { defer close(done); m.answer(ctx, pcm, "") }()
 
 		// Give the answer time to reach where it waits, then stop it there.
 		time.Sleep(50 * time.Millisecond)
@@ -306,7 +352,7 @@ func TestMuseVoiceAndItsFallback(t *testing.T) {
 			return err
 		}
 	}
-	spoke := []eventKind{evReplyText, evStreamAudio, evStreamAudio, evStreamAudio, evStreamAudio, evStreamAudio, evStreamEnd, evRunEnd}
+	spoke := []eventKind{evReplyText, evStreamAudio, evStreamAudio, evStreamAudio, evStreamAudio, evStreamAudio, evMusePartEnd, evStreamEnd, evRunEnd}
 	for name, c := range map[string]struct {
 		voice    speech.Voice
 		n        int
@@ -317,7 +363,7 @@ func TestMuseVoiceAndItsFallback(t *testing.T) {
 		msg      []string
 	}{
 		"built in":                   {voice: speech.BuiltIn, asked: []speech.Voice{speech.BuiltIn}, want: spoke},
-		"the endpoint":               {voice: "coral", n: museChunk, asked: []speech.Voice{"coral"}, want: []eventKind{evReplyText, evStreamAudio, evStreamEnd, evRunEnd}},
+		"the endpoint":               {voice: "coral", n: museChunk, asked: []speech.Voice{"coral"}, want: []eventKind{evReplyText, evStreamAudio, evMusePartEnd, evStreamEnd, evRunEnd}},
 		"refused":                    {voice: "coral", err: refused, asked: []speech.Voice{"coral", speech.BuiltIn}, want: spoke},
 		"failed with a piece held":   {voice: "coral", n: museChunk / 2, err: refused, asked: []speech.Voice{"coral", speech.BuiltIn}, want: spoke},
 		"failed after it started":    {voice: "coral", n: museChunk, err: refused, asked: []speech.Voice{"coral"}, want: []eventKind{evReplyText, evStreamAudio, evError}, msg: []string{"bad key"}},
@@ -330,7 +376,7 @@ func TestMuseVoiceAndItsFallback(t *testing.T) {
 			on(muse.Settled{Text: "Hi."})
 			return muse.Reply{Text: "Hi."}, nil
 		}}, func() speech.Voice { return c.voice }, engines(&asked, c.n, c.err, c.localErr), p.post)
-		m.answer(context.Background(), someAudio)
+		m.answer(context.Background(), someAudio, "")
 
 		if !slices.Equal(asked, c.asked) {
 			t.Errorf("%s: asked %v, want %v", name, asked, c.asked)
@@ -369,5 +415,23 @@ func TestMuseExcuseSaysWhich(t *testing.T) {
 	}
 	if !strings.Contains(pair, "paired") {
 		t.Errorf("the unpaired excuse does not say so: %q", pair)
+	}
+}
+
+func TestMuseFollowUpsStayInWakeChat(t *testing.T) {
+	m := newViaMuse(fakeLink{}, builtIn, nil, nil)
+	m.brain = func() config.Brain { return config.Brain{Muse: config.Muse{Chat: "new"}} }
+	var first string
+	for i, follow := range []bool{false, true, true, false} {
+		if err := m.startTurn("Hey Muse", follow); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = m.sessionID
+		}
+		if first == "" || (m.sessionID == first) != (i < 3) {
+			t.Fatalf("turn %d: unexpected chat %q", i, m.sessionID)
+		}
+		m.Stop()
 	}
 }

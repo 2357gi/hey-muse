@@ -343,7 +343,7 @@ func TestAskText(t *testing.T) {
 	// The earlier message on the stream is not part of the answer, and a typed message has no
 	// transcript to report. The fake sends the whole answer ahead of the acknowledgment, as the
 	// real service can, so it is all there by the time the device knows which message was its own.
-	want := []ReplyEvent{ReplyText{Text: "you said: hello"}, Settled{Text: "you said: hello"}}
+	want := []ReplyEvent{ReplyText{Text: "you said: hello"}, MessageReady{Text: "you said: hello"}, Settled{Text: "you said: hello"}}
 	if got := events(); !reflect.DeepEqual(got, want) {
 		t.Errorf("events = %#v", got)
 	}
@@ -385,10 +385,33 @@ func TestReplyStreams(t *testing.T) {
 	want := []ReplyEvent{
 		ReplyText{Text: "you sai"},
 		ReplyText{Text: "you said: hello"},
+		MessageReady{Text: "you said: hello"},
 		Settled{Text: "you said: hello"},
 	}
 	if got := events(); !reflect.DeepEqual(got, want) {
 		t.Errorf("events = %#v", got)
+	}
+}
+
+func TestAcknowledgmentBeforeFinalReply(t *testing.T) {
+	hold := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(hold) }) }
+	defer release()
+	h, _ := online(t, func(h *harness, _ *State, _ *Config) { h.fake.hold = hold; h.fake.acknowledgeFirst = true })
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var ready []string
+	reply, err := h.client.Ask(ctx, Text("hello"), func(e ReplyEvent) {
+		if msg, ok := e.(MessageReady); ok {
+			ready = append(ready, msg.Text)
+			if msg.Text == "確認します。" {
+				release()
+			}
+		}
+	})
+	if err != nil || !reflect.DeepEqual(ready, []string{"確認します。", "you said: hello"}) || reply.Text != "確認します。\n\nyou said: hello" {
+		t.Fatalf("ready=%q, reply=%+v, err=%v", ready, reply, err)
 	}
 }
 
@@ -790,5 +813,117 @@ func TestCancelMidUploadWithdrawsTheVoiceNote(t *testing.T) {
 	}
 	if seen := receive(t, vm.chats, "the chat"); seen.body["message"] != "after" {
 		t.Errorf("the abandoned voice note was taken: %+v", seen.body)
+	}
+}
+
+func TestAskSideChat(t *testing.T) {
+	h, vm := online(t, nil)
+	ask := func(in AskInput) {
+		t.Helper()
+		reply, err := h.client.Ask(context.Background(), in, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Reply{Text: "you said: main"}
+		if in.kind == askVoice {
+			want = Reply{Text: "you said: a voice note", Heard: "a voice note"}
+		}
+		if in.kind == askText && in.SessionID != "" {
+			want.Text = "you said: side"
+		}
+		if reply != want {
+			t.Fatalf("reply = %+v, want %+v", reply, want)
+		}
+		seen := receive(t, vm.chats, "chat")
+		if in.SessionID == "" {
+			if _, ok := seen.body["session_id"]; ok {
+				t.Fatal("main chat includes session_id")
+			}
+		} else if seen.body["session_id"] != in.SessionID {
+			t.Fatalf("body = %v", seen.body)
+		}
+	}
+	in := VoiceNote(testWAV(100))
+	in.SessionID = "echo-fixed"
+	ask(in)
+	ask(in)
+	events := h.fake.log()
+	if a, b := indexOf(events, "chat echo-fixed"), indexOf(events, `subscribe {"session_id":"echo-fixed"}`); a < 0 || b <= a {
+		t.Fatalf("fresh ordering: %v", events)
+	}
+	text := Text("side")
+	text.SessionID = "echo-another"
+	ask(text)
+	ask(Text("main"))
+	if indexOf(h.fake.log(), "subscribe {}") < 0 {
+		t.Fatal("main subscription body is not empty")
+	}
+	h.fake.mu.Lock()
+	h.fake.events = nil
+	h.fake.mu.Unlock()
+	ask(in)
+	events = h.fake.log()
+	if a, b := indexOf(events, `subscribe {"session_id":"echo-fixed"}`), indexOf(events, "chat echo-fixed"); a < 0 || b <= a {
+		t.Fatalf("known ordering: %v", events)
+	}
+}
+
+func TestSideChatFiltersEvents(t *testing.T) {
+	for _, field := range []string{"top", "payload"} {
+		turn := newTurn()
+		turn.sessionID = "ours"
+		turn.acknowledged("user")
+		event := chatEvent{Event: "message.assistant", Payload: map[string]json.RawMessage{"message_id": json.RawMessage(`"answer"`), "display_text": json.RawMessage(`"hello"`)}}
+		set := func(id string) {
+			raw, _ := json.Marshal(id)
+			if field == "top" {
+				event.SessionID = raw
+			} else {
+				event.Payload["session_id"] = raw
+			}
+		}
+		set("other")
+		turn.add(event)
+		if turn.whole() || turn.text() != "" {
+			t.Fatal("foreign event satisfied turn")
+		}
+		before := turn.lastEvent
+		status := chatEvent{SessionID: json.RawMessage(`"other"`), Event: "agent.status", Payload: map[string]json.RawMessage{"activity_code": json.RawMessage(`"working"`)}}
+		turn.add(status)
+		if turn.busy || !turn.lastEvent.Equal(before) {
+			t.Fatal("foreign status affected turn")
+		}
+		set("ours")
+		turn.add(event)
+		if !turn.whole() || turn.text() != "hello" {
+			t.Fatal("matching event ignored")
+		}
+	}
+}
+
+func TestSideChatAcceptsUnscopedEvents(t *testing.T) {
+	turn := newTurn()
+	turn.sessionID = "ours"
+	turn.acknowledged("user")
+	turn.add(chatEvent{Event: "message.assistant", Payload: map[string]json.RawMessage{"message_id": json.RawMessage(`"answer"`), "display_text": json.RawMessage(`"hello"`)}})
+	if !turn.whole() || turn.text() != "hello" {
+		t.Fatal("unscoped event ignored")
+	}
+}
+
+func TestCompletedTaskSkipsQuietWaitAndDeliversAllMessages(t *testing.T) {
+	h, _ := online(t, func(h *harness, _ *State, _ *Config) { h.fake.finishTask = true; h.fake.acknowledgeFirst = true })
+	// An hour makes successful completion depend on the task event, rather than a quiet timeout.
+	h.client.t.final = time.Hour
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var messages []string
+	reply, err := h.client.Ask(ctx, Text("hello"), func(e ReplyEvent) {
+		if m, ok := e.(MessageReady); ok {
+			messages = append(messages, m.Text)
+		}
+	})
+	if err != nil || len(messages) != 2 || !strings.Contains(reply.Text, "you said: hello") {
+		t.Fatalf("completion lost messages: err=%v messages=%d reply=%q", err, len(messages), reply.Text)
 	}
 }

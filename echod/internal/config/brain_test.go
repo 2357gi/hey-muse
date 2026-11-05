@@ -72,3 +72,36 @@ func TestBrainStandalone(t *testing.T) {
 		}
 	}
 }
+
+func TestMuseChatValidation(t *testing.T) {
+	st := load(t)
+	for _, chat := range []string{"", "main", "new", "echo-fixed", "bad_id", strings.Repeat("a", 65)} {
+		if err := st.Set().Brain().Set(Brain{Muse: Muse{Chat: chat}}); err != nil {
+			t.Fatal(err)
+		}
+		want := chat
+		if chat == "bad_id" || len(chat) > 64 {
+			want = ""
+		}
+		if got := st.Get().Brain.Muse.Chat; got != want {
+			t.Fatalf("chat %q: %q", chat, got)
+		}
+		reloaded, err := Load(st.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reloaded.Get().Brain.Muse.Chat != want {
+			t.Fatal("reload changed chat")
+		}
+	}
+	if err := os.WriteFile(st.path, []byte(`{"brain":{"muse":{"chat":"bad_id"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(st.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Get().Brain.Muse.Chat != "" {
+		t.Fatal("invalid loaded chat retained")
+	}
+}

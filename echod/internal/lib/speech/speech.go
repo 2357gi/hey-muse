@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/mothership"
 	"io"
 	"net/http"
 	"strings"
@@ -54,6 +55,9 @@ func (c Client) Speak(ctx context.Context, text string, out func(samples []int16
 	base := strings.TrimRight(c.Base, "/")
 	if base == "" {
 		base = DefaultBase
+	}
+	if err := mothership.Wait(ctx, base); err != nil {
+		return err
 	}
 	body := map[string]string{
 		"model":           orDefault(c.Model, DefaultModel),

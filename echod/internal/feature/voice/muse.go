@@ -5,11 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
+	gadget "github.com/HuskerMinion/techo5/echod/internal/feature/muse"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/endpoint"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/muse"
@@ -17,14 +19,15 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/lib/speech"
 )
 
-// Muse answers either a locally transcribed message or a voice note. The device speaks its reply.
+// Muse answers a locally transcribed message or a voice note. Local weather and
+// configured appliance commands can be handled before a Muse request.
 
 // museLink is the connection a turn asks through: feature/muse's Feature, or a test's stand-in.
 type museLink interface {
 	Ready() bool
 	// Paired is whether the Muse app has paired the device, connected just now or not.
 	Paired() bool
-	Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent)) (muse.Reply, error)
+	Ask(ctx context.Context, wav []byte, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error)
 }
 
 // speakFunc says text in voice v, calling out with the samples at 16 kHz as they arrive.
@@ -42,6 +45,10 @@ type viaMuse struct {
 	post       func(event)
 	brain      func() config.Brain
 	transcribe func(context.Context, config.Brain, []byte) (string, error)
+	early      *earlySTT
+	nextProbe  int
+	hall       hallTurns
+	sessionID  string // owned by the send queue and captured by End
 	utterance
 }
 
@@ -51,18 +58,18 @@ func newViaMuse(link museLink, voice func() speech.Voice, speak speakFunc, post 
 }
 
 type museTextLink interface {
-	AskText(context.Context, string, func(muse.ReplyEvent)) (muse.Reply, error)
+	AskText(context.Context, string, string, func(muse.ReplyEvent)) (muse.Reply, error)
 }
 
 // ask uses the configured Wyoming recognizer when present. Muse still answers
 // and runs its device commands; only transcription moves to the owner's server.
 // If that server is unavailable, preserve the original voice-note path.
-func (m *viaMuse) ask(ctx context.Context, pcm []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
+func (m *viaMuse) ask(ctx context.Context, pcm []byte, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error) {
 	samples := endpoint.Trim(samplesOf(pcm))
 	b := m.brain()
 	if textLink, ok := m.link.(museTextLink); ok && strings.TrimSpace(b.STT) != "" {
 		sttCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		text, err := m.transcribe(sttCtx, b, bytesOf(samples))
+		text, err := m.finalTranscript(sttCtx, b, bytesOf(samples))
 		cancel()
 		if ctx.Err() != nil {
 			return muse.Reply{}, ctx.Err()
@@ -74,7 +81,18 @@ func (m *viaMuse) ask(ctx context.Context, pcm []byte, on func(muse.ReplyEvent))
 			}
 			slog.Info("muse: using local speech recognition", "language", b.Language)
 			on(muse.Heard{Text: text})
-			reply, err := textLink.AskText(ctx, text, func(e muse.ReplyEvent) {
+			if answer, ok := localWeatherAnswer(text); ok {
+				return muse.Reply{Heard: text, Text: answer}, nil
+			}
+			if command, ok := parseAppliance(text); ok {
+				answer := m.hall.executeCommand(ctx, sessionID, command)
+				return muse.Reply{Heard: text, Text: answer}, nil
+			}
+			if m.hall.hold(sessionID, text) {
+				return muse.Reply{Heard: text, Text: hallHoldReply(text)}, nil
+			}
+			prompt := m.hall.withReceipt(sessionID, text)
+			reply, err := textLink.AskText(ctx, prompt, sessionID, func(e muse.ReplyEvent) {
 				if _, heard := e.(muse.Heard); !heard {
 					on(e)
 				}
@@ -82,9 +100,21 @@ func (m *viaMuse) ask(ctx context.Context, pcm []byte, on func(muse.ReplyEvent))
 			reply.Heard = text
 			return reply, err
 		}
+		if _, statErr := os.Stat("/data/misc/techo5/idle-home.json"); statErr == nil {
+			return muse.Reply{Text: "聞き取れませんでした。もう一度お願いします。"}, nil
+		}
 		slog.Warn("muse: local recognition unavailable, using Muse voice recognition", "err", err)
 	}
-	return m.link.Ask(ctx, wavFile(media.Normalize(samples)), on)
+	return m.link.Ask(ctx, wavFile(media.Normalize(samples)), sessionID, on)
+}
+
+func (m *viaMuse) startTurn(phrase string, followUp bool) error {
+	if !followUp {
+		m.sessionID = gadget.TargetChat(m.brain().Muse.Chat)
+	}
+	m.early = nil
+	m.nextProbe = 32000
+	return m.utterance.Start(phrase)
 }
 
 func (m *viaMuse) Name() string { return "muse" }
@@ -104,7 +134,11 @@ func (m *viaMuse) Excuse() string {
 // seconds to answer, and the next turn's start must not wait behind it.
 func (m *viaMuse) End() error {
 	if ctx, pcm := m.take(); ctx != nil {
-		safe.Go("muse turn", func() { m.answer(ctx, pcm) })
+		sessionID := m.sessionID
+		if m.early != nil {
+			ctx = context.WithValue(ctx, earlySTTKey{}, m.early)
+		}
+		safe.Go("muse turn", func() { m.answer(ctx, pcm, sessionID) })
 	}
 	return nil
 }
@@ -125,96 +159,132 @@ func speakMuse(ctx context.Context, v speech.Voice, text string, out func(sample
 	}.Speak(ctx, v, text, out)
 }
 
-// answer asks Muse and reports the way Home Assistant's pipeline events are reported.
-//
-// The first Settled is taken as the whole answer and spoken there and then, inside the callback,
-// which holds Ask open while the voice plays: Muse going on after a pause is rare, and an answer
-// that waited for it would start late every time. Whatever Muse adds after that is not said.
-func (m *viaMuse) answer(ctx context.Context, pcm []byte) {
-	fail := func(code string, err error) {
-		if ctx.Err() == nil {
-			m.post(event{kind: evError, code: code, msg: err.Error()})
-		}
-	}
-
+// Each completed chat message can be spoken before the overall task is finished.
+// The playback stream closes only after Ask returns, so a pause between messages
+// does not end the turn. The Muse read loop keeps collecting updates during TTS.
+func (m *viaMuse) answer(ctx context.Context, pcm []byte, sessionID string) {
+	ctx = muse.WithLatency(ctx)
+	muse.LogLatency(ctx, slog.Default(), "recognition_start")
 	start := time.Now()
 	var heardAt, repliedAt, firstAudioAt time.Duration
-	var spoken bool
+	var preview, spoken string
 	var speechErr error
-	reply, err := m.ask(ctx, pcm, func(e muse.ReplyEvent) {
-		if ctx.Err() != nil {
+	askCtx, stopAsk := context.WithCancel(ctx)
+	defer stopAsk()
+
+	speakPart := func(part, display string) {
+		if part == "" || speechErr != nil || ctx.Err() != nil {
 			return
 		}
-		switch e := e.(type) {
+		if repliedAt == 0 {
+			repliedAt = time.Since(start)
+		}
+		muse.LogLatency(ctx, slog.Default(), "speech_start", "characters", len([]rune(part)))
+		m.post(event{kind: evReplyText, text: display, ctx: ctx})
+		first, err := m.say(ctx, part, start)
+		if firstAudioAt == 0 {
+			firstAudioAt = first
+		}
+		if err != nil {
+			speechErr = err
+			stopAsk()
+			return
+		}
+		if first > 0 && ctx.Err() == nil {
+			m.post(event{kind: evMusePartEnd, ctx: ctx})
+		}
+	}
+	// Settled and the final return value contain the entire answer. Speak only
+	// the remainder, including a partial last message returned at the turn cap.
+	speakRemainder := func(full string) {
+		full = speech.Spoken(full)
+		tail, ok := strings.CutPrefix(full, spoken)
+		if !ok {
+			return
+		} // already spoken text was edited on the server
+		part := strings.TrimSpace(tail)
+		if part != "" {
+			speakPart(part, full)
+			spoken = full
+		}
+	}
+	reply, err := m.ask(askCtx, pcm, sessionID, func(e muse.ReplyEvent) {
+		if askCtx.Err() != nil {
+			return
+		}
+		switch v := e.(type) {
 		case muse.Heard:
+			muse.LogLatency(ctx, slog.Default(), "recognition_done")
 			heardAt = time.Since(start)
-			m.post(event{kind: evHeard, text: strings.TrimSpace(e.Text)})
-		case muse.Settled:
-			if spoken {
+			m.post(event{kind: evHeard, text: strings.TrimSpace(v.Text), ctx: ctx})
+		case muse.ReplyText:
+			text := speech.Spoken(v.Text)
+			if text != "" && text != preview {
+				if preview == "" {
+					slog.Info("muse: first reply text received", "elapsed_ms", time.Since(start).Milliseconds())
+				}
+				preview = text
+				m.post(event{kind: evReplyPreview, text: text, ctx: ctx})
+			}
+		case muse.MessageReady:
+			part := speech.Spoken(v.Text)
+			if part == "" {
 				return
 			}
-			spoken = true
-			repliedAt = time.Since(start)
-			firstAudioAt, speechErr = m.say(ctx, speech.Spoken(e.Text), start)
+			if spoken != "" {
+				spoken += "\n\n"
+			}
+			spoken += part
+			display := spoken
+			if strings.HasPrefix(preview, spoken) {
+				display = preview
+			}
+			speakPart(part, display)
+		case muse.Settled:
+			speakRemainder(v.Text)
 		}
 	})
 	if ctx.Err() != nil {
 		return
 	}
-	switch {
-	case spoken:
-		// The answer is out. Muse going on, or the connection dropping on the way out, is nothing the
-		// turn still needs.
-	case err != nil:
-		fail("intent-failed", err)
-		return
-	default:
-		// Ask returned without a pause it could call settled: Muse ran on to the cap, or said nothing.
-		text := speech.Spoken(reply.Text)
-		if text == "" {
-			m.post(event{kind: evRunEnd})
-			return
-		}
-		repliedAt = time.Since(start)
-		firstAudioAt, speechErr = m.say(ctx, text, start)
+	if err == nil {
+		speakRemainder(reply.Text)
 	}
 	if ctx.Err() != nil {
 		return
 	}
 	if speechErr != nil {
-		fail("tts-failed", speechErr)
+		m.post(event{kind: evError, code: "tts-failed", msg: speechErr.Error(), ctx: ctx})
 		return
 	}
-	slog.Info("muse turn answered", "heard_ms", heardAt.Milliseconds(), "replied_ms", repliedAt.Milliseconds(),
-		"first_audio_ms", firstAudioAt.Milliseconds(), "spoken_ms", time.Since(start).Milliseconds())
+	if err != nil {
+		m.post(event{kind: evError, code: "intent-failed", msg: err.Error(), ctx: ctx})
+		return
+	}
+	final := speech.Spoken(reply.Text)
+	if strings.HasSuffix(final, "?") || strings.HasSuffix(final, "？") {
+		m.post(event{kind: evContinue, ctx: ctx})
+	}
+	if spoken != "" {
+		m.post(event{kind: evStreamEnd, ctx: ctx})
+	}
+	m.post(event{kind: evRunEnd, ctx: ctx})
+	muse.LogLatency(ctx, slog.Default(), "voice_done")
+	slog.Info("muse turn answered", "heard_ms", heardAt.Milliseconds(), "replied_ms", repliedAt.Milliseconds(), "first_audio_ms", firstAudioAt.Milliseconds(), "spoken_ms", time.Since(start).Milliseconds())
 }
 
-// say reports the answer and streams its voice: the text, a continue for a question, the audio in
-// chunks of at least museChunk, then the stream's end and the run's. It returns when the first
-// audio was handed over, and what went wrong if the voice did not finish. Nothing is posted once
-// ctx has ended.
-//
-// An endpoint that fails before any of its voice was played (a bad or spent key, no network) has
-// the same answer said in the device's own voice instead: the words are already on the screen, and
-// a reply that is only read is not what was asked for. Once its voice has started there is no going
-// back over what was said, and the turn fails as it always did.
+// say sends PCM for one message. Its caller owns the lifetime of the turn.
 func (m *viaMuse) say(ctx context.Context, text string, start time.Time) (firstAudio time.Duration, err error) {
-	m.post(event{kind: evReplyText, text: text})
-	// An answer that asks something wants one, and gets it without the wake word again: what Home
-	// Assistant's pipeline reports as continue_conversation.
-	if strings.HasSuffix(text, "?") {
-		m.post(event{kind: evContinue})
-	}
-
 	held := make([]int16, 0, 2*museChunk)
 	flush := func() {
 		if len(held) == 0 || ctx.Err() != nil {
 			return
 		}
 		if firstAudio == 0 {
+			muse.LogLatency(ctx, slog.Default(), "first_audio_chunk")
 			firstAudio = time.Since(start)
 		}
-		m.post(event{kind: evStreamAudio, audio: bytesOf(held)})
+		m.post(event{kind: evStreamAudio, audio: bytesOf(held), ctx: ctx})
 		held = held[:0]
 	}
 	speak := func(v speech.Voice) error {
@@ -241,8 +311,6 @@ func (m *viaMuse) say(ctx context.Context, text string, start time.Time) (firstA
 		return firstAudio, err
 	}
 	flush()
-	m.post(event{kind: evStreamEnd})
-	m.post(event{kind: evRunEnd})
 	return firstAudio, nil
 }
 

@@ -271,6 +271,15 @@ func TestTurnMatching(t *testing.T) {
 	if tn.text() != "Hello" || tn.whole() {
 		t.Fatalf("done but Muse still working: %q, whole %v", tn.text(), tn.whole())
 	}
+	session := &session{}
+	early := session.snapshot(tn, 0)
+	if early.whole || len(early.ready) != 1 || early.ready[0].Text != "Hello" {
+		t.Fatal("the acknowledgment was not ready while the agent was busy")
+	}
+	tn.add(event("message.assistant", map[string]any{"message_id": "r1", "display_text": "Hello"}))
+	if next := session.snapshot(tn, early.nextMessage); len(next.ready) != 0 {
+		t.Fatal("duplicate acknowledgment delivered")
+	}
 	// A second message, linked by naming the first, extends the answer.
 	tn.add(event("delta.message_start", map[string]any{"message_id": "r2", "reply_to_message_id": "r1"}))
 	tn.add(event("agent.status", map[string]any{"activity_code": "idle"}))

@@ -71,6 +71,8 @@ func init() {
 // hasEqualizer is whether this screen offers the Wave and Bars turn screens (render_turn_spot.go).
 const hasEqualizer = true
 
+var homeTurnStyles []turnStyle
+
 // hasNightSwitch is whether Home Assistant can turn the night on and off here: not on the Spot, whose
 // night hours are its own.
 const hasNightSwitch = false
@@ -1203,7 +1205,7 @@ func (d *Display) frame() time.Duration {
 	on, view, at := d.on, d.view, d.viewAt
 	s := roundScene{
 		now:       now,
-		phase:     view.Phase,
+		phase:     view.DisplayPhase(),
 		heard:     view.Heard,
 		reply:     view.Reply,
 		menuOpen:  d.menuOpen,

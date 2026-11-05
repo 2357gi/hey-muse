@@ -8,7 +8,7 @@ In **Setup → Voice assistant**, set **Answered by** to **Muse** and **Language
 | Whisper on your PC | The PC's LAN address and Wyoming port, e.g. `192.0.2.10:50024` |
 | Muse voice recognition | Leave empty |
 
-Hey Muse displays the transcript and sends it to Muse as text. If the configured recognition service fails, Hey Muse sends the captured audio to Muse as a voice note. An empty transcript ends the turn. The wake word is configured separately.
+Hey Muse displays the transcript and sends it to Muse as text. If the configured recognition service fails, Hey Muse normally sends the captured audio to Muse as a voice note. With the local home dashboard configured (`idle-home.json`), it asks the user to repeat instead, so uncertain appliance commands do not bypass the local matcher. An empty transcript ends the turn. The wake word is configured separately.
 
 ## Build the Echo services
 

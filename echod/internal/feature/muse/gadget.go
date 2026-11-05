@@ -21,6 +21,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/lib/muse"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/muse/pairing"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
+	"github.com/google/uuid"
 )
 
 func init() {
@@ -224,22 +225,23 @@ func (f *Feature) Paired() bool {
 }
 
 // Ask says a voice note to Muse and waits for the answer; on hears it arrive (muse.Client.Ask).
-func (f *Feature) Ask(ctx context.Context, wav []byte, on func(muse.ReplyEvent)) (muse.Reply, error) {
-	return f.ask(ctx, muse.VoiceNote(wav), on)
+func (f *Feature) Ask(ctx context.Context, wav []byte, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error) {
+	return f.ask(ctx, muse.VoiceNote(wav), sessionID, on)
 }
 
 // AskText sends a transcript made by the owner's speech recognition server.
-func (f *Feature) AskText(ctx context.Context, text string, on func(muse.ReplyEvent)) (muse.Reply, error) {
-	return f.ask(ctx, muse.Text(text), on)
+func (f *Feature) AskText(ctx context.Context, text, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error) {
+	return f.ask(ctx, muse.Text(text), sessionID, on)
 }
 
-func (f *Feature) ask(ctx context.Context, input muse.AskInput, on func(muse.ReplyEvent)) (muse.Reply, error) {
+func (f *Feature) ask(ctx context.Context, input muse.AskInput, sessionID string, on func(muse.ReplyEvent)) (muse.Reply, error) {
 	f.mu.Lock()
 	r := f.client
 	f.mu.Unlock()
 	if r == nil {
 		return muse.Reply{}, muse.ErrOffline
 	}
+	input.SessionID = sessionID
 	return r.c.Ask(ctx, input, on)
 }
 
@@ -377,4 +379,16 @@ func (s stateStore) Save(st muse.State) error {
 	// with ErrUnpaired, and the phase says so from here.
 	s.f.reconcileLocked()
 	return nil
+}
+
+// TargetChat selects a session for a wake and its follow-ups.
+func TargetChat(chat string) string {
+	switch chat {
+	case "", "main":
+		return ""
+	case "new":
+		return uuid.NewString()
+	default:
+		return chat
+	}
 }

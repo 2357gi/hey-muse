@@ -26,6 +26,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/endpoint"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/muse"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/speech"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/triggers"
@@ -76,36 +77,40 @@ func (p phase) String() string {
 type eventKind int
 
 const (
-	evStart       eventKind = iota // a wake word fired, or something asked for a turn
-	evHeard                        // Home Assistant has heard enough
-	evReplyText                    // a reply is coming
-	evReplyURL                     // the reply can be fetched whole
-	evStreamStart                  // reply audio is about to arrive over the API
-	evStreamAudio                  // a chunk of it
-	evStreamEnd                    // all of it has been sent
-	evPlayed                       // the reply has finished playing
-	evRunEnd                       // Home Assistant closed the run
-	evError                        // the pipeline failed
-	evCancel                       // the user gave up on it
-	evTimeout                      // Home Assistant never closed the run
-	evPending                      // a turn held back for the last one to close has waited long enough
-	evPlaying                      // the reply (event.reply) has audio, so the pipeline owes nothing more
-	evContinue                     // Home Assistant wants the answer to a question it just asked
-	evSpeaking                     // VAD detected speech has started
-	evSpokeEnd                     // the device heard the speaker finish; text is the turn's id
-	evLookHere                     // the answer put something on the screen: no listening again after it
-	evCutOff                       // another sound took the speaker from the reply (event.reply)
+	evStart        eventKind = iota // a wake word fired, or something asked for a turn
+	evHeard                         // Home Assistant has heard enough
+	evReplyText                     // a reply is coming
+	evReplyPreview                  // a display update while Muse is composing the answer
+	evReplyURL                      // the reply can be fetched whole
+	evStreamStart                   // reply audio is about to arrive over the API
+	evStreamAudio                   // a chunk of it
+	evStreamEnd                     // all of it has been sent
+	evPlayed                        // the reply has finished playing
+	evRunEnd                        // Home Assistant closed the run
+	evError                         // the pipeline failed
+	evCancel                        // the user gave up on it
+	evTimeout                       // Home Assistant never closed the run
+	evPending                       // a turn held back for the last one to close has waited long enough
+	evPlaying                       // the reply (event.reply) has audio, so the pipeline owes nothing more
+	evContinue                      // Home Assistant wants the answer to a question it just asked
+	evSpeaking                      // VAD detected speech has started
+	evSpokeEnd                      // the device heard the speaker finish; text is the turn's id
+	evLookHere                      // the answer put something on the screen: no listening again after it
+	evMusePartEnd                   // flush a message without ending the turn
+	evCutOff                        // another sound took the speaker from the reply (event.reply)
 )
 
 type event struct {
-	kind  eventKind
-	slot  int
-	text  string
-	url   string
-	audio []byte
-	code  string
-	msg   string
-	at    time.Time
+	ctx      context.Context // lifetime of a Muse turn
+	consumed chan bool       // local synthesis waits until the playback worker takes its PCM
+	kind     eventKind
+	slot     int
+	text     string
+	url      string
+	audio    []byte
+	code     string
+	msg      string
+	at       time.Time
 
 	// reply is which reply an evPlaying or evCutOff is about (reply.id). One from a reply that was
 	// stopped, or from anything that is not a reply, must not take the turn's deadline away or end
@@ -211,6 +216,7 @@ type nextTurn struct {
 // reply is which answer is being spoken, and how. Only one of them is set: a url means it is being
 // fetched whole, a stream means it is arriving over the API. Both play under one claim on the speaker.
 type reply struct {
+	trace  context.Context
 	url    string
 	stream *stream
 
@@ -233,7 +239,7 @@ func newConversation(vs *esphome.VoiceSatellite) *conversation {
 	}
 	c.ha = ha{vs: vs}
 	c.direct = newDirect(c.post)
-	c.muse = newViaMuse(gadget.Get(), museVoice, speakMuse, c.post)
+	c.muse = newViaMuse(gadget.Get(), museVoice, speakMuse, c.postMuse)
 	c.be = c.ha
 
 	vs.OnPipelineEvent = c.pipeline
@@ -305,6 +311,36 @@ func (c *conversation) post(e event) {
 	}
 }
 
+// Local synthesis may deliver a whole reply in a LAN burst. Apply backpressure
+// to that producer, leaving the conversation loop free to handle interruption.
+func (c *conversation) postMuse(e event) {
+	if e.ctx == nil {
+		c.post(e)
+		return
+	}
+	if e.kind == evStreamAudio || e.kind == evMusePartEnd {
+		e.consumed = make(chan bool, 1)
+	}
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case c.events <- e:
+		}
+		if e.consumed == nil {
+			return
+		}
+		select {
+		case <-e.ctx.Done():
+			return
+		case taken := <-e.consumed:
+			if taken {
+				return
+			}
+		}
+	}
+}
+
 // Phase is what it is doing, for anything outside that needs to know.
 func (c *conversation) Phase() phase { return phase(c.visible.Load()) }
 
@@ -341,6 +377,9 @@ func (c *conversation) Run(ctx context.Context) {
 // handle is the transition table. Anything an event cannot do from the current phase is dropped
 // here, which is what makes the whole thing idempotent.
 func (c *conversation) handle(e event) {
+	if e.ctx != nil && e.ctx.Err() != nil {
+		return
+	}
 	switch e.kind {
 	case evStart:
 		c.start(nextTurn{slot: e.slot})
@@ -399,7 +438,18 @@ func (c *conversation) handle(e event) {
 			c.think()
 		}
 
+	case evReplyPreview:
+		if (c.phase == phaseThinking || c.phase == phaseReplying) && e.ctx.Err() == nil && c.shown.Reply != e.text {
+			c.shown.Reply = e.text
+			Changed.Emit(c.shown)
+		}
+
 	case evReplyText:
+		// Muse has finished answering. Give the speech service its own bounded
+		// wait even when the answer arrived near the end of the thinking limit.
+		if _, ok := c.be.(*viaMuse); ok && c.phase == phaseThinking {
+			c.arm(wakeword.MaxThink(c.slot))
+		}
 		slog.Info("replying", "slot", c.slot+1, "text", e.text)
 		c.log.Replied(e.text)
 		c.turn.Replying(e.text)
@@ -442,8 +492,15 @@ func (c *conversation) handle(e event) {
 		if c.phase != phaseReplying {
 			c.speak("")
 		}
-		c.reply.stream.send(e.audio)
+		c.reply.trace = e.ctx
+		c.reply.stream.send(playbackChunk{data: e.audio, consumed: e.consumed})
 
+	case evMusePartEnd:
+		if c.phase == phaseReplying && c.reply.stream != nil {
+			c.reply.stream.send(playbackChunk{partEnd: true, consumed: e.consumed})
+		} else if e.consumed != nil {
+			e.consumed <- true
+		}
 	case evStreamEnd:
 		// Everything Home Assistant is going to send has been sent. What the errand is still holding
 		// back for the cushion plays, and it finishes once that has been heard.
@@ -452,6 +509,7 @@ func (c *conversation) handle(e event) {
 		}
 
 	case evPlayed:
+		muse.LogLatency(c.reply.trace, slog.Default(), "playback_done")
 		c.reported(e.at)
 		if c.phase == phaseReplying {
 			slot := c.slot
@@ -489,6 +547,7 @@ func (c *conversation) handle(e event) {
 		if e.reply == 0 || e.reply != c.reply.id {
 			return
 		}
+		muse.LogLatency(c.reply.trace, slog.Default(), "playback_start")
 		c.disarm()
 
 	case evCutOff:
@@ -517,6 +576,9 @@ func (c *conversation) handle(e event) {
 		}
 
 		slog.Error("pipeline error", "slot", c.slot+1, "code", e.code, "message", e.msg)
+		if _, ok := c.be.(*viaMuse); ok && c.phase == phaseReplying {
+			c.sound.Silence()
+		}
 		c.clearPending()
 		c.idle("failed", activity.Failed)
 		c.trouble()
@@ -657,6 +719,15 @@ func (c *conversation) start(n nextTurn) {
 	// A follow-up chimes like the wake word that started the conversation, unless the slot has been
 	// told a follow-up should be silent: the microphone is open again with nothing said to say so. It
 	// is not a wake, though, so it does not report a phrase nobody spoke.
+	// Subscribe before queuing the short cue. Count captured samples instead of
+	// starting another timer after the UI and the speech detector have opened.
+	var chirp chirpCapture
+	cfg := config.Get()
+	if _, ok := c.be.(*viaMuse); ok && !n.followUp && cfg.Brain.STT != "" &&
+		cfg.Microphone.Cancel && cfg.Wake.Slot(slot).Tone == config.ToneChirp && wakeword.Tones(slot, false) {
+		chirp.skip = int(wakeword.ChimeLength(slot, false) * mic.Rate / time.Second)
+		chirp.frames, chirp.stop = c.source.Listen("turn")
+	}
 	wakeword.Chime(slot, n.followUp)
 	if !n.followUp {
 		c.log.Woke(phrase)
@@ -664,7 +735,12 @@ func (c *conversation) start(n nextTurn) {
 	c.turn = c.log.Begin(slot+1, phrase)
 	recording.Get().Opens(c.turn.ID(), slot)
 	be := c.be
-	c.send("start", func() error { return be.Start(phrase) })
+	c.send("start", func() error {
+		if m, ok := be.(*viaMuse); ok {
+			return m.startTurn(phrase, n.followUp)
+		}
+		return be.Start(phrase)
+	})
 
 	c.shown = State{}
 	c.enter(phaseListening)
@@ -676,7 +752,7 @@ func (c *conversation) start(n nextTurn) {
 	}
 
 	c.arm(c.listenFor(n))
-	c.startAudio(slot, n.followUp)
+	c.startAudio(slot, n.followUp, chirp)
 	// The phrase is logged for a follow-up too, because it is what chose the pipeline — not because
 	// anyone said it.
 	slog.Info("turn started", "slot", slot+1, "phrase", phrase, "follow_up", n.followUp)
@@ -1009,7 +1085,7 @@ func audioSettings() *api.VoiceAssistantAudioSettings {
 
 // startAudio begins sending microphone frames. The streamer only reads, so it needs no coordination
 // beyond being told to stop.
-func (c *conversation) startAudio(slot int, followUp bool) {
+func (c *conversation) startAudio(slot int, followUp bool, chirp chirpCapture) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopAudio = cancel
 
@@ -1018,7 +1094,7 @@ func (c *conversation) startAudio(slot int, followUp bool) {
 	// be kept out of the microphone.
 	id := c.turn.ID()
 	be := c.be
-	safe.Go("turn audio", func() { c.stream(ctx, be, slot, followUp, id) })
+	safe.Go("turn audio", func() { c.stream(ctx, be, slot, followUp, id, chirp) })
 }
 
 func (c *conversation) stopStreaming() {
@@ -1036,8 +1112,23 @@ func (c *conversation) stopStreaming() {
 // follow-up nobody chimes for: the room's echo of the last word, which nobody answers inside of.
 const followUpSettle = 250 * time.Millisecond
 
-func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp bool, id string) {
-	frames, unlisten := c.source.Listen("turn")
+type chirpCapture struct {
+	frames <-chan []int16
+	stop   func()
+	skip   int // remaining microphone samples during the two notes
+}
+
+func (c *chirpCapture) afterTone(frame []int16) []int16 {
+	n := min(c.skip, len(frame))
+	c.skip -= n
+	return frame[n:]
+}
+
+func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp bool, id string, chirp chirpCapture) {
+	frames, unlisten := chirp.frames, chirp.stop
+	if frames == nil {
+		frames, unlisten = c.source.Listen("turn")
+	}
 	defer unlisten()
 
 	buf := make([]byte, 0, mic.FrameSamples*2)
@@ -1049,7 +1140,7 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	// A slot that chimes does not send it: whoever is talking waits for the tone, so the history holds
 	// the wake word rather than the request, and the tone itself is louder at the array than they are.
 	pre := c.source.Recent(mic.History)
-	if wakeword.Tones(slot, followUp) {
+	if chirp.frames != nil || wakeword.Tones(slot, followUp) {
 		pre = nil
 	}
 
@@ -1138,6 +1229,8 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	// hardwareTail is what the driver holds after the queue runs out.
 	var sounding time.Time
 	switch {
+	case chirp.frames != nil:
+		slog.Info("capture opens at chirp end", "skip_samples", chirp.skip)
 	case wakeword.Tones(slot, followUp):
 		sounding = time.Now().Add(wakeword.ChimeLength(slot, followUp) + speaker.HardwareTail)
 	case followUp && !fromHA:
@@ -1176,6 +1269,12 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 				return
 			}
 
+			if chirp.skip > 0 {
+				frame = chirp.afterTone(frame)
+				if len(frame) == 0 {
+					continue
+				}
+			}
 			if !sounding.IsZero() {
 				if time.Now().Before(sounding) {
 					held += len(frame)
