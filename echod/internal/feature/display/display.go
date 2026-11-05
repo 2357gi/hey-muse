@@ -388,6 +388,7 @@ func build() *Display {
 	d.dimmestNum = dimmestNumber(d)
 	d.lang = langSelect()
 	voice.Changed.Listen(d.changed)
+	voice.ReadOnlyViews.Listen(d.readOnlyView)
 	media.Get().OnVolume.Listen(d.volumeMoved)
 	ambient.Get().Lux.Listen(d.lux)
 	touch.Get().Gestures.Listen(d.gesture)

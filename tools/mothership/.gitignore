@@ -6,3 +6,6 @@ home-local.json
 *-measurement.json
 test-result.json
 .venv/
+jev-evaluation*.json
+*.key
+.secrets/

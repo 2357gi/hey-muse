@@ -28,6 +28,8 @@ type homeEnvironment struct {
 }
 
 type standbyView struct {
+	Scope                  string
+	ScopeUntil             time.Time
 	Environment            *homeEnvironment
 	EnvironmentUpdated     time.Time
 	EnvironmentUnavailable bool

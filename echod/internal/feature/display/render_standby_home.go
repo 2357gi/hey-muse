@@ -66,13 +66,8 @@ func (r *renderer) drawStandby(s scene) {
 
 	card := rect(330, 24, 604, 224)
 	r.roundFill(card, 18, panel, panel)
-	text(24, true, "予定", 353, 63, mint)
-	var events []homeEvent
-	for _, ev := range s.home.Events {
-		if ev.End.After(s.now) {
-			events = append(events, ev)
-		}
-	}
+	events, title := visibleAgenda(s.home, s.now)
+	text(24, true, title, 353, 63, mint)
 	pages := (len(events) + 2) / 3
 	page := 0
 	if pages > 0 {
@@ -87,7 +82,10 @@ func (r *renderer) drawStandby(s scene) {
 	}
 	text(20, false, pageText, 818, 62, muted)
 	if len(events) == 0 {
-		line := "7日以内の予定はありません"
+		line := emptyAgendaLabel(title)
+		if len(s.home.Events) >= 24 {
+			line = "この期間の予定を確認できません"
+		}
 		if s.home.Updated.IsZero() {
 			line = "予定を読み込み中"
 		}
@@ -112,9 +110,6 @@ func (r *renderer) drawStandby(s scene) {
 			when = "開催中"
 		}
 		lineColor := mint
-		if ev.Calendar == "二人" {
-			lineColor = gold
-		}
 		r.roundFill(rect(353, y-12, 4, 29), 2, lineColor, lineColor)
 		text(20, false, date, 367, y+9, muted)
 		text(20, true, when, 425, y+9, ink)

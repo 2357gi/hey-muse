@@ -33,7 +33,8 @@ who answers. Everything else about the device is TECHO5's, and its own README is
 
 This branch also includes Japanese speech and display support, per-wake side chats, a calendar
 and weather dashboard, and optional local SwitchBot control through a PC bridge.
-See [the consolidated changes and setup](docs/muse-local-changes.md).
+See [the consolidated changes and setup](docs/muse-local-changes.md). Optional
+[Jev intent routing](docs/jev-read-only.md) handles Japanese weather and calendar paraphrases.
 
 ## What you need
 

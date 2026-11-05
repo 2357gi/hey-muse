@@ -176,7 +176,8 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 4
 
-    def __init__(self, address, backend, allowed_network, sleep_guard=None, token=None):
+    def __init__(self, address, backend, allowed_network, sleep_guard=None, token=None, home_root=None):
+        self.home_root = home_root or Path(__file__).resolve().parent
         self.token = token or os.environ.get("SPEECH_BRIDGE_TOKEN", "")
         if not self.token:
             raise ValueError("SPEECH_BRIDGE_TOKEN is required")
@@ -257,7 +258,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized_peer():
             return self.error(403, 'Peer or Host is not allowed')
-        if self.path in ('/echo-home/v1', '/echo-hall/v1'):
+        if self.path in ('/echo-home/v1', '/echo-hall/v1', '/echo-intent/v1'):
             return self.echo_home()
         if self.path not in ('/v1/audio/speech', '/audio/speech'):
             return self.error(404, 'Not found')
@@ -341,7 +342,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def echo_home(self):
-        root = Path(__file__).resolve().parent
+        root = self.server.home_root
         lengths = self.headers.get_all('Content-Length', [])
         if self.headers.get('Transfer-Encoding') or len(lengths) != 1 or not re.fullmatch(r'[0-9]{1,4}', lengths[0]) or not 1 <= int(lengths[0]) <= 4096:
             return self.error(400, 'Invalid request')
@@ -351,6 +352,13 @@ class Handler(BaseHTTPRequestHandler):
             signature = hmac.new(key, packet, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(signature, self.headers.get('X-Echo-Signature', '')):
                 return self.error(403, 'Invalid device signature')
+            if self.path == '/echo-intent/v1':
+                try:
+                    from jev_intent import dispatch
+                    response = dispatch(packet)
+                except Exception:
+                    return self.error(400, 'Intent request unavailable')
+                return self.respond(200, response, 'application/octet-stream')
             if self.path == '/echo-hall/v1':
                 try:
                     from hall_light import dispatch

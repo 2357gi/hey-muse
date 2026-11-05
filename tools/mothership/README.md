@@ -63,3 +63,7 @@ python -m unittest discover -s tools/mothership -p "test_*.py"
 通常テストは偽のAPIと一時ファイルを使います。`test_speech_bridge.py` を直接起動した場合のみ、ローカルVOICEVOXの実応答も確認して音声ファイルを書き出します。
 
 `measure_jev.py` は標準入力の1行目から評価用APIキーを読み、固定例文をJevへ送ります。結果は `hall-jev-measurement.json` に保存し、Gitには含めません。家電操作は行いません。自動テストでは実行しません。
+
+## 天気・予定の言い換え
+
+Jevによる分類を任意で有効化できます。認証情報は `TYPESAFE_API_KEY` または `TYPESAFE_API_KEY_FILE` から読みます。[対応範囲・設定・実API評価](../../docs/jev-read-only.md)を参照してください。

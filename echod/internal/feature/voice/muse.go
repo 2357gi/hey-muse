@@ -45,6 +45,7 @@ type viaMuse struct {
 	post       func(event)
 	brain      func() config.Brain
 	transcribe func(context.Context, config.Brain, []byte) (string, error)
+	classify   func(context.Context, string) (string, error)
 	early      *earlySTT
 	nextProbe  int
 	hall       hallTurns
@@ -54,7 +55,7 @@ type viaMuse struct {
 
 func newViaMuse(link museLink, voice func() speech.Voice, speak speakFunc, post func(event)) *viaMuse {
 	return &viaMuse{link: link, voice: voice, speak: speak, post: post,
-		brain: func() config.Brain { return config.Get().Brain }, transcribe: transcribe}
+		brain: func() config.Brain { return config.Get().Brain }, transcribe: transcribe, classify: classifyReadOnly}
 }
 
 type museTextLink interface {
@@ -84,12 +85,26 @@ func (m *viaMuse) ask(ctx context.Context, pcm []byte, sessionID string, on func
 			if answer, ok := localWeatherAnswer(text); ok {
 				return muse.Reply{Heard: text, Text: answer}, nil
 			}
+			if answer, ok := readOnlyAnswer(exactCalendarIntent(text)); ok {
+				return muse.Reply{Heard: text, Text: answer}, nil
+			}
 			if command, ok := parseAppliance(text); ok {
 				answer := m.hall.executeCommand(ctx, sessionID, command)
 				return muse.Reply{Heard: text, Text: answer}, nil
 			}
 			if m.hall.hold(sessionID, text) {
 				return muse.Reply{Heard: text, Text: hallHoldReply(text)}, nil
+			}
+			if m.classify != nil && ReadOnlyViews.Listeners() > 0 {
+				intent, classifyErr := m.classify(ctx, text)
+				if ctx.Err() != nil {
+					return muse.Reply{}, ctx.Err()
+				}
+				if classifyErr == nil {
+					if answer, ok := readOnlyAnswer(intent); ok {
+						return muse.Reply{Heard: text, Text: answer}, nil
+					}
+				}
 			}
 			prompt := m.hall.withReceipt(sessionID, text)
 			reply, err := textLink.AskText(ctx, prompt, sessionID, func(e muse.ReplyEvent) {
