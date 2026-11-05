@@ -1,4 +1,4 @@
-"""One encrypted Echo dashboard request. Calls fixed connected tools without starting a model turn."""
+"""Encrypted Echo dashboard: direct SwitchBot API; connected tools only for calendars."""
 import base64
 from contextlib import closing
 import json
@@ -142,8 +142,18 @@ def power_choices(scenes, last, definitions):
     return buttons, targets
 
 
-def power(apps, definitions, action=None):
-    scenes = apps.tool('switchbot_mcp.list_scenes', {})
+def execute_scene(api, ident, scenes=None):
+    # Keep the local allowlist at the caller and verify current membership before
+    # dispatch. Never retry: a timeout may follow a successful physical action.
+    if scenes is None:
+        scenes = api.request('', collection='scenes')
+    if sum(scene['sceneId'] == ident for scene in scenes) != 1:
+        raise ValueError('scene unavailable or ambiguous')
+    api.request('/'+ident+'/execute', {}, collection='scenes')
+
+
+def power(api, definitions, action=None):
+    scenes = api.request('', collection='scenes')
     with closing(sqlite3.connect(ROOT/'home-requests.sqlite', timeout=2)) as db, db:
         db.execute('create table if not exists power_last (device text primary key, direction text)')
         if action is not None:
@@ -154,8 +164,9 @@ def power(apps, definitions, action=None):
         if action is None or action not in targets:
             return dict(ok=action is None, controls=buttons)
         _, device, direction = action.split('/')
-        ack = apps.tool('switchbot_mcp.execute_scene', dict(sceneId=targets[action]))
-        accepted = isinstance(ack, dict) and ack.get('outcome') == 'accepted'
+        execute_scene(api, targets[action], scenes)
+        # HallLight.request raises unless HTTP 200 and SwitchBot statusCode 100.
+        accepted = True
         if accepted and direction in ('on','off'):
             db.execute('insert or replace into power_last values (?,?)', (device, direction))
             last[device] = direction
@@ -178,34 +189,47 @@ def unpack(body):
 
 def process(body):
     cfg, cipher, nonce, req = unpack(body)
-    apps = Apps(cfg.get('codex', 'codex'))
+    apps = api = None
     try:
-        apps.connect()
+        # The bridge invokes this script with -I. Only this trusted sibling
+        # directory is added, to reuse the voice path's Token/Secret client.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from hall_light import HallLight
         if req['op'] == 'agenda':
+            apps = Apps(cfg.get('codex', 'codex'))
+            apps.connect()
             result = dict(ok=True, events=agenda(apps,cfg['calendars']))
             if cfg.get('power_controls'):
                 try:
-                    result['controls'] = power(apps, cfg['power_controls'])['controls']
+                    api = HallLight()
+                    result['controls'] = power(api, cfg['power_controls'])['controls']
                 except Exception:
                     pass  # Calendar and fixed scene controls still work.
         elif req['op'] == 'environment' and cfg.get('environment_device'):
-            status = apps.tool('switchbot_mcp.get_device_status', dict(deviceId=cfg['environment_device']))
+            api = HallLight()
+            status = api.request('/'+cfg['environment_device']+'/status')
             readings = {key: status[key] for key in ('temperature', 'humidity', 'CO2', 'battery')
                         if type(status.get(key)) in (int, float)}
             result = dict(ok=bool(readings), environment=readings)
         elif req['op'] == 'scene' and cfg.get('power_controls') and req.get('id','').startswith('power/'):
-            result = power(apps, cfg['power_controls'], req['id'])
+            api = HallLight()
+            result = power(api, cfg['power_controls'], req['id'])
         elif req['op'] == 'power_status' and cfg.get('power_controls'):
-            result = power(apps, cfg['power_controls'])
+            api = HallLight()
+            result = power(api, cfg['power_controls'])
         elif req['op'] == 'scene' and req.get('id') in cfg.get('scenes', []):
-            ack = apps.tool('switchbot_mcp.execute_scene',dict(sceneId=req['id']))
-            result = dict(ok=isinstance(ack, dict) and ack.get('outcome') == 'accepted')
+            api = HallLight()
+            execute_scene(api, req['id'])
+            result = dict(ok=True)
         else:
             raise ValueError('unknown request')
     except Exception:
         result = dict(ok=False)
     finally:
-        apps.close()
+        if apps is not None:
+            apps.close()
+        if api is not None:
+            api.conn.close()
     return pack(cipher, nonce, result)
 
 

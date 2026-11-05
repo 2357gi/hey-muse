@@ -1,6 +1,6 @@
 # 母艦ブリッジ
 
-Echo の音声出力、カレンダー、室内環境、SwitchBot の定型操作を提供します。カレンダー・環境・画面のシーン操作には接続済みの Codex Calendar / SwitchBot コネクターを使います。音声の定型家電操作は SwitchBot API と、対応する廊下電球の Bluetooth 接続を使います。
+Echo の音声出力、カレンダー、室内環境、SwitchBot の定型操作を提供します。カレンダーには接続済みの Codex Calendar コネクターを使います。室内環境の取得と画面のシーン操作は、保存済みのToken/SecretでSwitchBot APIへ直接通信します。音声の定型家電操作は SwitchBot API と、対応する廊下電球の Bluetooth 接続を使います。
 
 ## 起動
 
@@ -34,7 +34,7 @@ python -I tools/mothership/speech_bridge.py --bind PC_LAN_IP --allowed-network E
 
 `power_controls` は例えば `monitor` という論理IDに、`label`（表示名）、`icon`（MDIアイコン）、`toggle`（切替シーン名）、または `on` と `off`（それぞれのシーン名）を設定します。ボタンに表示した方向を要求へ含めるため、表示が古くてもサーバー側で方向を反転しません。APIの受付を表示し、家電の実際の電源状態を断定しません。
 
-SwitchBotのAPI認証は `SWITCHBOT_CREDENTIALS` で指定するローカルファイルから読みます。未指定時はホームディレクトリの `switchbot_token.env` を使います。ファイルには `SWITCHBOT_TOKEN` と `SWITCHBOT_SECRET` を設定します。トークン・秘密鍵はEchoへ転送しません。
+SwitchBotのAPI認証は `SWITCHBOT_CREDENTIALS` で指定するローカルファイルから読みます。未指定時はホームディレクトリの `switchbot_token.env` を使います。ファイルには `SWITCHBOT_TOKEN` と `SWITCHBOT_SECRET` を設定します。トークン・秘密鍵はEchoへ転送しません。画面のボタン・温湿度・CO₂・電池残量の取得にもこの認証を使用し、ChatGPT側のSwitchBotコネクター認証には依存しません。シーン操作はローカル許可リストと現在のシーン一覧で対象を確認し、実行結果が不明な場合は自動再送しません。
 
 ## Echo側
 
